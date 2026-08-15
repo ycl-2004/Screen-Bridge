@@ -1,7 +1,7 @@
 import Foundation
 import BetterCastShared
 
-/// Shared constants for the YC Cast sender app.
+/// Shared constants for the ScreenBridge sender app.
 /// Centralizes magic numbers, ports, paths, and dimensions that were previously
 /// duplicated across multiple files.
 enum BCConstants {

@@ -4,7 +4,7 @@ class LogManager: ObservableObject {
     static let shared = LogManager()
     @Published var logs: [String] = []
 
-    /// Mirrors the in-app log to `~/Library/Logs/YC Cast/sender.log`.
+    /// Mirrors the in-app log to `~/Library/Logs/ScreenBridge/sender.log`.
     ///
     /// The in-memory buffer keeps only the last 200 lines and is lost when the
     /// app quits, and stdout is fully buffered when the app is launched by
@@ -15,7 +15,7 @@ class LogManager: ObservableObject {
     private let fileHandle: FileHandle? = {
         let directory = FileManager.default
             .homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/YC Cast", isDirectory: true)
+            .appendingPathComponent("Library/Logs/ScreenBridge", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("sender.log")
 

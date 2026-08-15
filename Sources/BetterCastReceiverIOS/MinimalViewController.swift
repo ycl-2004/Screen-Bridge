@@ -10,7 +10,7 @@ class MinimalViewController: UIViewController {
         
         // Simple label with iOS 12 warning
         let label = UILabel()
-        label.text = "YC Cast Receiver\\n\\n⚠️ iOS 12 Not Supported\\n\\nNetwork.framework crashes on iOS 12.5.7\\n\\nMinimum: iOS 13.0\\nRecommended: iOS 14+\\n\\niPhone 6 max: iOS 12.5.7"
+        label.text = "ScreenBridge Receiver\\n\\n⚠️ iOS 12 Not Supported\\n\\nNetwork.framework crashes on iOS 12.5.7\\n\\nMinimum: iOS 13.0\\nRecommended: iOS 14+\\n\\niPhone 6 max: iOS 12.5.7"
         label.textColor = .orange
         label.textAlignment = .center
         label.numberOfLines = 0

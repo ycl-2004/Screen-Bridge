@@ -83,6 +83,55 @@ final class MediaLivenessEvaluatorTests: XCTestCase {
         )
     }
 
+    /// A static extended desktop produces no new frames at all. The last access
+    /// unit staying undecoded is then just the tail of the stream, not a stuck
+    /// decoder, and must not tear down a healthy session.
+    func testStaticScreenIsNotReportedAsDecoderStall() {
+        let snapshot = makeSnapshot(
+            heartbeat: now,
+            accessUnit: now.addingTimeInterval(-30),
+            decoded: now.addingTimeInterval(-32),
+            rendered: now.addingTimeInterval(-32),
+            hasDecoded: true,
+            hasRendered: true
+        )
+
+        XCTAssertNil(MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout))
+    }
+
+    /// Same reasoning one stage later: nothing new was decoded, so the renderer
+    /// is idle rather than stuck.
+    func testStaticScreenIsNotReportedAsRendererStall() {
+        let snapshot = makeSnapshot(
+            heartbeat: now,
+            accessUnit: now.addingTimeInterval(-30),
+            decoded: now.addingTimeInterval(-30),
+            rendered: now.addingTimeInterval(-32),
+            hasDecoded: true,
+            hasRendered: true
+        )
+
+        XCTAssertNil(MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout))
+    }
+
+    /// The transport heartbeat remains the authority on a genuinely dead link,
+    /// even while the picture is legitimately static.
+    func testStaticScreenStillFailsWhenHeartbeatStops() {
+        let snapshot = makeSnapshot(
+            heartbeat: now.addingTimeInterval(-30),
+            accessUnit: now.addingTimeInterval(-30),
+            decoded: now.addingTimeInterval(-32),
+            rendered: now.addingTimeInterval(-32),
+            hasDecoded: true,
+            hasRendered: true
+        )
+
+        XCTAssertEqual(
+            MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout),
+            .transportHeartbeatStopped
+        )
+    }
+
     private func makeSnapshot(
         heartbeat: Date,
         accessUnit: Date,

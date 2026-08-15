@@ -9,11 +9,11 @@
     <key>CFBundleIdentifier</key>
     <string>com.yichen.yccast.receiver.ios</string>
     <key>CFBundleDisplayName</key>
-    <string>YC Cast</string>
+    <string>ScreenBridge</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>YC Cast</string>
+    <string>ScreenBridge</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -44,7 +44,7 @@
         </dict>
     </dict>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>YC Cast uses the local network to connect to your Mac.</string>
+    <string>ScreenBridge uses the local network to connect to your Mac.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_yc-cast._tcp</string>

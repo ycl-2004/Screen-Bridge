@@ -1,9 +1,9 @@
 import Foundation
 import BetterCastShared
 
-/// Shared constants for the YC Cast iOS receiver app.
+/// Shared constants for the ScreenBridge iOS receiver app.
 enum BCConstants {
-    /// Standard TCP port for YC Cast video/audio stream.
+    /// Standard TCP port for ScreenBridge video/audio stream.
     static let tcpPort: UInt16 = 51820
 
     /// Standard UDP port for chunked frame delivery.

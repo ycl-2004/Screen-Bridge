@@ -199,12 +199,20 @@ public enum MediaLivenessEvaluator {
            now.timeIntervalSince(snapshot.sessionStartedAt) > timeout {
             return .noDecodableFirstFrame
         }
+        // A stalled stage is one that is falling behind work that is still
+        // arriving. On a static extended desktop ScreenCaptureKit stops
+        // producing frames entirely, so an old undecoded access unit is simply
+        // the last thing that was sent — not evidence of a stuck decoder. Only
+        // treat a stage as stalled while its input is still fresh; the
+        // transport heartbeat above already covers a genuinely dead link.
         if snapshot.lastVideoAccessUnitReceived > snapshot.lastVideoDecoded,
+           now.timeIntervalSince(snapshot.lastVideoAccessUnitReceived) <= timeout,
            now.timeIntervalSince(snapshot.lastVideoDecoded) > timeout {
             return .decoderStalled
         }
         if snapshot.hasDecodedFrame,
            snapshot.lastVideoDecoded > snapshot.lastVideoRendered,
+           now.timeIntervalSince(snapshot.lastVideoDecoded) <= timeout,
            now.timeIntervalSince(snapshot.lastVideoRendered) > timeout {
             return .rendererStalled
         }

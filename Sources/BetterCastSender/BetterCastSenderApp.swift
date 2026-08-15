@@ -149,8 +149,8 @@ struct GuidedTourOverlay: View {
 
     private let steps: [TourStep] = [
         TourStep(
-            title: "Welcome to YC Cast",
-            description: "Let's take a quick tour of the app. YC Cast turns any device into a wireless extended display for your Mac.",
+            title: "Welcome to ScreenBridge",
+            description: "Let's take a quick tour of the app. ScreenBridge turns any device into a wireless extended display for your Mac.",
             icon: "hand.wave.fill",
             sidebarTarget: nil,
             anchorKey: nil
@@ -387,7 +387,7 @@ struct OnboardingView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 18))
                     .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
 
-                Text("Welcome to YC Cast")
+                Text("Welcome to ScreenBridge")
                     .font(.system(size: 26, weight: .bold))
 
                 Text("Screen capture plus local Mac control")
@@ -488,7 +488,7 @@ struct OnboardingView: View {
             icon: "record.circle",
             iconColor: .red,
             title: "Screen Recording",
-            description: "YC Cast needs Screen Recording permission to capture your display and stream it to receivers.",
+            description: "ScreenBridge needs Screen Recording permission to capture your display and stream it to receivers.",
             isGranted: screenRecordingGranted,
             actionTitle: "Open Screen Recording Settings",
             action: {
@@ -770,7 +770,7 @@ struct SidebarView: View {
                     .tourAnchor("sidebar_logs")
             }
         }
-        .navigationTitle("YC Cast")
+        .navigationTitle("ScreenBridge")
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 6) {
@@ -799,7 +799,7 @@ struct SidebarView: View {
                         .font(.system(size: 11))
                 }
                 .buttonStyle(.borderless)
-                .help("Quit YC Cast")
+                .help("Quit ScreenBridge")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -1078,7 +1078,7 @@ struct DetailPanelView: View {
             switch self {
             case .clearPairing: return "Clear the pairing code?"
             case .resetPermissions: return "Reset Screen Recording permission?"
-            case .restart: return "Restart YC Cast?"
+            case .restart: return "Restart ScreenBridge?"
             case .setupWizard: return "Run the setup wizard again?"
             }
         }
@@ -1088,7 +1088,7 @@ struct DetailPanelView: View {
             case .clearPairing:
                 return "Any connected iPad is disconnected immediately, and you'll need to enter the same code on both devices again."
             case .resetPermissions:
-                return "macOS revokes Screen Recording for YC Cast and the app restarts to ask for it again. Streaming stops."
+                return "macOS revokes Screen Recording for ScreenBridge and the app restarts to ask for it again. Streaming stops."
             case .restart:
                 return "Streaming stops and any connected iPad is disconnected."
             case .setupWizard:
@@ -1199,7 +1199,7 @@ struct DetailPanelView: View {
                         Text("Extended Display").tag(true)
                         Text("Mirror Built-in").tag(false)
                     }
-                    InfoTip(text: "Extended creates a separate YC Cast display. Mirror sends the Mac's built-in screen instead.")
+                    InfoTip(text: "Extended creates a separate ScreenBridge display. Mirror sends the Mac's built-in screen instead.")
                 }
 
                 HStack {
@@ -1276,7 +1276,7 @@ struct DetailPanelView: View {
                         case .storageFailed:
                             pairingAlert = PairingAlert(
                                 title: "Couldn't Save Pairing Code",
-                                message: "The keychain refused the write. Try again, and restart YC Cast if it keeps failing."
+                                message: "The keychain refused the write. Try again, and restart ScreenBridge if it keeps failing."
                             )
                         }
                     }
@@ -1296,7 +1296,7 @@ struct DetailPanelView: View {
                         case .tooWeak, .storageFailed:
                             pairingAlert = PairingAlert(
                                 title: "Couldn't Save Pairing Code",
-                                message: "The keychain refused the write. Try again, and restart YC Cast if it keeps failing."
+                                message: "The keychain refused the write. Try again, and restart ScreenBridge if it keeps failing."
                             )
                         }
                     }
@@ -1389,7 +1389,7 @@ struct DetailPanelView: View {
                     if client.localNetworkNeedsAttention {
                         HStack {
                             Label(
-                                "Device discovery is blocked. Allow YC Cast in Privacy & Security > Local Network.",
+                                "Device discovery is blocked. Allow ScreenBridge in Privacy & Security > Local Network.",
                                 systemImage: "network.slash"
                             )
                             .font(.caption)
@@ -1454,7 +1454,7 @@ struct DetailPanelView: View {
             // About & Changelog
             Section("About") {
                 LabeledContent("Build") {
-                    Text("YC Cast \(UpdateChecker.currentVersion)")
+                    Text("ScreenBridge \(UpdateChecker.currentVersion)")
                         .foregroundStyle(.secondary)
                 }
 
@@ -1632,7 +1632,7 @@ struct DetailPanelView: View {
 
 // MARK: - Display Overview (arrangement view)
 
-/// A display item in the arrangement view — either the built-in display or a YC Cast virtual display.
+/// A display item in the arrangement view — either the built-in display or a ScreenBridge virtual display.
 struct DisplayItem: Identifiable {
     let id: String
     let name: String
@@ -1724,7 +1724,7 @@ struct DisplayOverviewView: View {
             ))
         }
 
-        // Connected YC Cast displays
+        // Connected ScreenBridge displays
         for display in client.connectedDisplays {
             let b = display.displayBounds
             let w = b.width > 0 ? b.width : 1920
@@ -2584,7 +2584,10 @@ struct ConnectionPipeline {
     // TCP backpressure: at most one video packet is in Network.framework and
     // one recovery keyframe is retained. This bound applies to every route,
     // including P2P, wired, and loopback.
-    var sendInProgress: Bool = false
+    /// Frames handed to the transport but not yet reported complete.
+    /// Counted rather than flagged so reliable links can keep several frames in
+    /// flight instead of one per round trip.
+    var framesInFlight: Int = 0
     var pendingKeyframePacket: Data?
     var mediaHeartbeatInProgress: Bool = false
     var audioSendInProgress: Bool = false
@@ -2595,6 +2598,9 @@ struct ConnectionPipeline {
     var sentFramesSinceAdjustment: Int = 0
     var droppedFramesSinceAdjustment: Int = 0
     var lastBitrateAdjustment: Date = Date()
+    /// When the current capture pipeline started streaming, used to ignore
+    /// start-up burst congestion when adapting the bitrate.
+    var streamingStartedAt: Date = Date()
     // WiFi ADB vs USB ADB — WiFi has much less bandwidth, needs throttling
     var isWiFiADB: Bool = false
     // ADB/localhost connections always use TCP framing regardless of global protocol setting
@@ -3098,7 +3104,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             .flatMap(VirtualDisplayManager.DisplayPlacement.init(rawValue:)) ?? .right
         hiddenDeviceKeys = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenDeviceKeysDefaultsKey) ?? [])
         restorePersistedSettings()
-        // YC Cast is display-only: all direct control stays on the Mac.
+        // ScreenBridge is display-only: all direct control stays on the Mac.
         UserDefaults.standard.removeObject(forKey: "iPadInputEnabled")
         
         // We can't monitor recursively in init easily, but we can start it.
@@ -3734,14 +3740,27 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
     
-    func connect(to service: DiscoveredService, isRetry: Bool = false) {
+    /// Cold USB/Thunderbolt and AWDL links routinely refuse the first dial
+    /// while the interface is still coming up, so a single retry was not
+    /// enough: connecting over cable regularly needed three tries, and the
+    /// user had to click Connect again by hand after ~16s of apparent failure.
+    private static let maximumConnectAttempts = 4
+    /// Pause between cable/AWDL warm-up retries. Dialing again immediately kept
+    /// the receiver's pending-handshake slots occupied by connections we had
+    /// just cancelled.
+    private static let connectRetryBackoff: TimeInterval = 1.5
+
+    func connect(to service: DiscoveredService, attempt: Int = 1) {
         let serviceKey = deviceKey(for: service.name)
         // Check if already connected or currently connecting to this service
         if connectedServices.contains(where: { deviceKey(for: $0.name) == serviceKey }) {
             LogManager.shared.log("Sender: Already connected to \(service.name)")
             return
         }
-        if connectingServiceNames.contains(serviceKey) {
+        // Only a fresh, externally initiated connect is a duplicate. A retry
+        // (attempt > 1) is the continuation of an attempt that already owns the
+        // slot, so it must not be rejected by its own reservation.
+        if attempt == 1, connectingServiceNames.contains(serviceKey) {
             LogManager.shared.log("Sender: Already connecting to \(service.name) — ignoring duplicate")
             return
         }
@@ -3842,26 +3861,49 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             // Only retry if still not connected (no pipeline created yet)
             if self.pipelines[connectionId] == nil && !connectionTimedOut {
                 connectionTimedOut = true
-                self.connectingServiceNames.remove(serviceKey)
+                // The reservation is deliberately NOT released here while a
+                // retry is still coming. Releasing it let a second, independent
+                // retry chain start for the same device — the chains then
+                // interleaved, each with its own attempt counter, and together
+                // they flooded the receiver (which refuses more than four
+                // pending handshakes), so a cable that works on one dial could
+                // never connect at all.
                 self.pendingConnections.removeValue(forKey: connectionId)
                 connection.cancel()
 
                 guard canRetryViaInfrastructure else {
-                    // AWDL wakes on demand, so a cold first dial often times out and
-                    // the *second* attempt succeeds. Do that second attempt
-                    // automatically, once, before reporting failure.
-                    if !isRetry {
-                        LogManager.shared.log("Sender: Connection to \(service.name) timed out in \(self.interfacePreference.rawValue) — retrying once (link warm-up)")
-                        self.setPhase(.connecting, "Retrying \(service.name)...")
-                        self.connect(to: service, isRetry: true)
+                    // The link wakes on demand, so cold dials time out until the
+                    // interface is up. Keep retrying automatically instead of
+                    // making the user click Connect again.
+                    if attempt < Self.maximumConnectAttempts {
+                        let next = attempt + 1
+                        LogManager.shared.log(
+                            "Sender: Connection to \(service.name) timed out in \(self.interfacePreference.rawValue) "
+                                + "— retrying (attempt \(next)/\(Self.maximumConnectAttempts), link warm-up)"
+                        )
+                        self.setPhase(.connecting, "Retrying \(service.name) (\(next)/\(Self.maximumConnectAttempts))...")
+                        // Back off so the receiver can retire the cancelled
+                        // handshake before the next dial arrives.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectRetryBackoff) { [weak self] in
+                            guard let self else { return }
+                            guard self.connectingServiceNames.contains(serviceKey) else { return }
+                            guard self.pipelines.values.allSatisfy({ self.deviceKey(for: $0.service.name) != serviceKey }) else { return }
+                            self.connect(to: service, attempt: next)
+                        }
                     } else {
+                        self.connectingServiceNames.remove(serviceKey)
                         self.setPhase(.failed, "Connection to \(service.name) timed out")
-                        LogManager.shared.log("Sender: Connection to \(service.name) timed out in \(self.interfacePreference.rawValue) (after retry)")
+                        LogManager.shared.log(
+                            "Sender: Connection to \(service.name) timed out in \(self.interfacePreference.rawValue) "
+                                + "after \(Self.maximumConnectAttempts) attempts"
+                        )
                     }
                     return
                 }
 
-                // Retry with plain TCP (no interface restrictions)
+                // The infrastructure fallback dials through connectWithParameters,
+                // which makes its own reservation, so release this one first.
+                self.connectingServiceNames.remove(serviceKey)
                 LogManager.shared.log("Sender: Connection to \(service.name) timed out — retrying via infrastructure")
                 let tcpOptions = NWProtocolTCP.Options()
                 tcpOptions.enableKeepalive = true
@@ -3924,7 +3966,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     self?.setPhase(.connecting, "Waiting for \(service.name)... (\(error.localizedDescription))")
                 case .cancelled:
                     timeoutWork.cancel()
-                    self?.connectingServiceNames.remove(serviceKey)
+                    // The warm-up retry path cancels this connection itself and
+                    // keeps owning the reservation for the next dial. Releasing
+                    // it here would re-open the door for a competing retry chain
+                    // that the timeout handler just took care to prevent.
+                    if !connectionTimedOut {
+                        self?.connectingServiceNames.remove(serviceKey)
+                    }
                     self?.pendingConnections.removeValue(forKey: connectionId)
                 default:
                     break
@@ -5075,7 +5123,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         pipelines[connectionId]?.audioConnection = nil
         pipelines[connectionId]?.audioSessionKey = nil
         pipelines[connectionId]?.audioEncoder = nil
-        pipelines[connectionId]?.sendInProgress = false
+        pipelines[connectionId]?.framesInFlight = 0
         pipelines[connectionId]?.pendingKeyframePacket = nil
         pipelines[connectionId]?.audioSendInProgress = false
         pipelines[connectionId]?.pendingAudioPacket = nil
@@ -5133,7 +5181,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 height: res.height,
                 ppi: shouldUseHiDPI ? min(220, res.ppi * 2) : res.ppi,
                 hiDPI: shouldUseHiDPI,
-                name: "YC Cast Display (\(serviceName))"
+                name: "ScreenBridge Display (\(serviceName))"
             )
 
             if let displayID = displayManager.createDisplay(resolution: resolution, placement: displayPlacement) {
@@ -5280,6 +5328,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         pipelines[connectionId]?.sentFramesSinceAdjustment = 0
         pipelines[connectionId]?.droppedFramesSinceAdjustment = 0
         pipelines[connectionId]?.lastBitrateAdjustment = Date()
+        pipelines[connectionId]?.streamingStartedAt = Date()
 
         reconcileAudioPipeline(for: connectionId)
 
@@ -5521,7 +5570,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         encodedFrameCount += 1
         if encodedFrameCount <= 3 || encodedFrameCount % 300 == 0 {
-            LogManager.shared.log("Sender: Sending frame #\(encodedFrameCount) (\(data.count) bytes, KF: \(isKeyframe), sendInProgress: \(pipeline.sendInProgress)) to \(pipeline.service.name)")
+            LogManager.shared.log("Sender: Sending frame #\(encodedFrameCount) (\(data.count) bytes, KF: \(isKeyframe), inFlight: \(pipeline.framesInFlight)/\(self.maxFramesInFlight(for: pipeline))) to \(pipeline.service.name)")
         }
 
         // Determine if this connection uses TCP framing (ADB/localhost always TCP, else follow global)
@@ -5608,10 +5657,23 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
+    /// How many video frames may be in flight on this link at once.
+    ///
+    /// Before backpressure was unified across every transport, USB/Thunderbolt,
+    /// peer-to-peer and loopback links ran with no completion gating at all and
+    /// were the most stable paths there were. Gating them at a single frame
+    /// capped throughput at one frame per round trip and produced drops on a
+    /// link that was not actually congested — which then pulled the adaptive
+    /// bitrate down. These links get real headroom back; the queue stays bounded
+    /// so a genuinely stalled link still cannot accumulate latency.
+    private func maxFramesInFlight(for pipeline: ConnectionPipeline) -> Int {
+        (pipeline.isP2P || pipeline.isWiredCable || pipeline.isLoopback) ? 4 : 1
+    }
+
     private func enqueueVideoPacket(_ packet: Data, isKeyframe: Bool, for connectionId: UUID) {
         guard let pipeline = pipelines[connectionId] else { return }
 
-        if pipeline.sendInProgress {
+        if pipeline.framesInFlight >= maxFramesInFlight(for: pipeline) {
             if isKeyframe {
                 if pipeline.pendingKeyframePacket != nil {
                     pipelines[connectionId]?.droppedFramesSinceAdjustment += 1
@@ -5626,7 +5688,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             return
         }
 
-        pipelines[connectionId]?.sendInProgress = true
+        pipelines[connectionId]?.framesInFlight += 1
         bytesSentWindow += packet.count
         let connection = pipeline.connection
         let serviceName = pipeline.service.name
@@ -5659,7 +5721,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
               pipeline.connection === connection,
               pipeline.lifecycleGeneration == lifecycleGeneration else { return }
 
-        pipelines[connectionId]?.sendInProgress = false
+        pipelines[connectionId]?.framesInFlight = max(0, pipeline.framesInFlight - 1)
 
         if let error {
             pipelines[connectionId]?.pendingKeyframePacket = nil
@@ -5682,11 +5744,26 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
+    /// Frames dropped during this window after capture starts are start-up
+    /// burst, not congestion: the first frames are full keyframes sent
+    /// back-to-back while only one packet may be in flight, so drops are
+    /// expected even on an idle link. Adapting on them dropped a 100 Mbps
+    /// cable link to 80 Mbps two seconds in, with a measured latency of 0 ms.
+    private static let bitrateWarmUpWindow: TimeInterval = 5.0
+
     private func maybeAdjustBitrate(for connectionId: UUID) {
         guard let pipeline = pipelines[connectionId],
               pipeline.currentAdaptiveBitrate > 0,
               pipeline.targetAdaptiveBitrate > 0,
               Date().timeIntervalSince(pipeline.lastBitrateAdjustment) >= 2.0 else {
+            return
+        }
+
+        if Date().timeIntervalSince(pipeline.streamingStartedAt) < Self.bitrateWarmUpWindow {
+            // Discard the warm-up sample instead of acting on it.
+            pipelines[connectionId]?.sentFramesSinceAdjustment = 0
+            pipelines[connectionId]?.droppedFramesSinceAdjustment = 0
+            pipelines[connectionId]?.lastBitrateAdjustment = Date()
             return
         }
 

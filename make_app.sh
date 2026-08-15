@@ -35,7 +35,7 @@ APP_PASSWORD="${APP_PASSWORD:-}"
 TEAM_ID="${TEAM_ID:-}"
 
 echo "============================================"
-echo "  Building YC Cast $VERSION (Universal Binary)"
+echo "  Building ScreenBridge $VERSION (Universal Binary)"
 echo "============================================"
 if [ "$SIGN_IDENTITY" = "-" ]; then
     echo "WARNING: creating an ad-hoc signed local-test build."
@@ -45,15 +45,15 @@ swift build -c release --arch arm64 --arch x86_64
 
 # Define Paths
 BUILD_DIR=".build/apple/Products/Release"
-APP_NAME="YC Cast.app"
-DMG_NAME="YC Cast.dmg"
+APP_NAME="ScreenBridge.app"
+DMG_NAME="ScreenBridge.dmg"
 DMG_STAGING="dmg_staging"
 
 # Clean old artifacts
 rm -rf "$APP_NAME" "BetterCast.app" "PrivateBetterCast.app" "BetterCastSender.app" "$DMG_STAGING" "$DMG_NAME" "BetterCast.dmg"
 
 # ============================================
-# YC Cast App (unified sender + receiver)
+# ScreenBridge App (unified sender + receiver)
 # ============================================
 echo "Creating $APP_NAME..."
 mkdir -p "$APP_NAME/Contents/MacOS"
@@ -78,7 +78,7 @@ cp -R "$APP_NAME" "$DMG_STAGING/"
 ln -s /Applications "$DMG_STAGING/Applications"
 
 # Create DMG from staging folder
-hdiutil create -volname "YC Cast" \
+hdiutil create -volname "ScreenBridge" \
     -srcfolder "$DMG_STAGING" \
     -ov -format UDZO \
     "$DMG_NAME"
@@ -119,6 +119,6 @@ echo "DMG:"
 echo "  - $DMG_NAME"
 echo ""
 echo "Installation:"
-echo "  1. Open the DMG and drag YC Cast to Applications"
+echo "  1. Open the DMG and drag ScreenBridge to Applications"
 echo "  2. Grant Screen Recording permission when prompted"
 echo "  3. Control the extended display from the Mac keyboard, trackpad, mouse, and clipboard"
