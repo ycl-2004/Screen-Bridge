@@ -242,7 +242,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
         // Title
         let titleLabel = UILabel()
-        titleLabel.text = "YC Cast"
+        titleLabel.text = "ScreenBridge"
         titleLabel.textColor = .white
         titleLabel.font = .systemFont(ofSize: 32, weight: .bold)
         titleLabel.textAlignment = .center
@@ -336,14 +336,14 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             .paragraphStyle: paragraphStyle
         ]
 
-        instructions.append(NSAttributedString(string: "1. Open YC Cast on your Mac\n", attributes: stepAttrs))
+        instructions.append(NSAttributedString(string: "1. Open ScreenBridge on your Mac\n", attributes: stepAttrs))
         instructions.append(NSAttributedString(string: "The Mac app creates the extended display and streams it here.\n\n", attributes: bodyAttrs))
 
         instructions.append(NSAttributedString(string: "2. Connect to the same network\n", attributes: stepAttrs))
         instructions.append(NSAttributedString(string: "Make sure this device and your Mac are on the same Wi-Fi network.\n\n", attributes: bodyAttrs))
 
         instructions.append(NSAttributedString(string: "3. Start streaming\n", attributes: stepAttrs))
-        instructions.append(NSAttributedString(string: "Open YC Cast on your Mac and select this device. Your Mac display will appear here.", attributes: bodyAttrs))
+        instructions.append(NSAttributedString(string: "Open ScreenBridge on your Mac and select this device. Your Mac display will appear here.", attributes: bodyAttrs))
 
         instructionsLabel.attributedText = instructions
 
@@ -917,7 +917,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
     private func setupShowSettingsGesture() {
         // Local-only convenience gesture. It must never compete with or delay
-        // iPadOS system gestures — YC Cast is display-only and registers no
+        // iPadOS system gestures — ScreenBridge is display-only and registers no
         // other recognizers.
         let threeFingerTap = UITapGestureRecognizer(target: self, action: #selector(showSettingsButton))
         threeFingerTap.numberOfTouchesRequired = 3

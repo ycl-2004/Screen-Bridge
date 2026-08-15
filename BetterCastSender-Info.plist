@@ -9,11 +9,11 @@
     <key>CFBundleIdentifier</key>
     <string>com.yichen.yccast.sender</string>
     <key>CFBundleDisplayName</key>
-    <string>YC Cast</string>
+    <string>ScreenBridge</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>YC Cast</string>
+    <string>ScreenBridge</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
@@ -27,16 +27,16 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>YC Cast finds your iPad on this local network and streams the extended display to it.</string>
+    <string>ScreenBridge finds your iPad on this local network and streams the extended display to it.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_yc-cast._tcp</string>
     </array>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>YC Cast needs to capture your screen to stream it to the receiver.</string>
+    <string>ScreenBridge needs to capture your screen to stream it to the receiver.</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>YC Cast needs to capture selected app audio so it can play on the receiver instead of this Mac.</string>
+    <string>ScreenBridge needs to capture selected app audio so it can play on the receiver instead of this Mac.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>YC Cast needs access to audio for system sound capture (if enabled).</string>
+    <string>ScreenBridge needs access to audio for system sound capture (if enabled).</string>
 </dict>
 </plist>

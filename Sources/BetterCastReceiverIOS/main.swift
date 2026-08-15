@@ -12,7 +12,7 @@ UIApplicationMain(
 
 #else
 
-print("YC Cast iOS receiver is intended for iOS devices only.")
+print("ScreenBridge iOS receiver is intended for iOS devices only.")
 print("Please select an iOS Simulator or Device in Xcode to run this target.")
 
 #endif

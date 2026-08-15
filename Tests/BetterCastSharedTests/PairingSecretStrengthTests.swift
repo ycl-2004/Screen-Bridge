@@ -48,6 +48,7 @@ final class PairingSecretStrengthTests: XCTestCase {
     func testNormalizationIsUnchangedForAcceptedInput() {
         // Guard against silently changing the wire format: existing pairings
         // must keep working.
+        // Legacy fixture: existing pairing normalization must remain stable.
         let expected = PairingAuthenticator.normalizedSecret(from: "YC-Cast 2026")
         let actual = PairingAuthenticator.normalizedSecret(from: "yccast2026")
         XCTAssertEqual(expected, actual)

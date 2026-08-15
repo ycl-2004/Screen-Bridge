@@ -1,6 +1,8 @@
-# YC Cast
+# ScreenBridge
 
-YC Cast turns an iPad into a display-only extended screen for a Mac. The Mac creates a virtual display and streams it to the iPad over a local Apple device path, while keyboard, trackpad, mouse, clipboard, and app control stay on the Mac.
+> Turn your iPad into a second display for your Mac.
+
+ScreenBridge turns an iPad into a display-only extended screen for a Mac. The Mac creates a virtual display and streams it to the iPad over a local Apple device path, while keyboard, trackpad, mouse, clipboard, and app control stay on the Mac.
 
 The current product path is a macOS sender plus an iPadOS receiver.
 
@@ -24,7 +26,7 @@ The current product path is a macOS sender plus an iPadOS receiver.
 
 ## Network Modes
 
-YC Cast exposes the transport preference in Settings:
+ScreenBridge exposes the transport preference in Settings:
 
 - `Auto (Apple Default)` lets Network.framework pick the best available path and can fall back when P2P is unavailable.
 - `Force P2P (WiFi Direct)` asks macOS/iPadOS to use Apple AWDL peer-to-peer networking. This keeps traffic between the Mac and iPad instead of routing through the home router when AWDL is available.
@@ -40,15 +42,15 @@ For the best second-screen experience, prefer `USB / Thunderbolt Cable` when ava
 - iPadOS system gestures (app switcher, Slide Over, Stage Manager) only change how the receiver app is presented on the iPad. They are never forwarded to the Mac. Mac-side gestures such as Mission Control change the streamed content because the iPad shows a real Mac display.
 - After an unexpected wireless drop the Mac retries the connection 3 times with backoff. The sender log shows `Auto-reconnect to ... in Ns`. If all attempts fail, reconnect manually from the sidebar.
 - For diagnosing drops, the sender log records the connection class (`P2P Direct Link (AWDL)`, `Wired/cable link`, or `Router/infrastructure link`), bitrate adjustments, and the disconnect reason.
-- If discovery was denied, YC Cast retries Bonjour with bounded backoff and then exposes `Local Network Settings…` plus `Retry Discovery` in Settings.
+- If discovery was denied, ScreenBridge retries Bonjour with bounded backoff and then exposes `Local Network Settings…` plus `Retry Discovery` in Settings.
 
 ## Gestures
 
 The iPad is a second screen, not a second gesture controller. All control of the Mac — including system gestures — happens on the Mac itself.
 
-- Mac trackpad gestures (five-finger pinch for Launchpad, Mission Control, App Exposé, Spaces switching, multi-finger swipes) always remain native macOS gestures. YC Cast installs no event taps, no event monitors, and never changes `presentationOptions`, so it cannot block, swallow, or reinterpret them — before, during, or after a connection.
-- macOS applies these gestures to the display where the pointer currently is. If the pointer is on the YC Cast virtual display, Launchpad or Mission Control appears on that display (and is therefore visible on the iPad). That is standard macOS multi-display behavior — the same thing happens with a cabled external monitor — not input forwarding, and YC Cast does not override it.
-- Touches and gestures on the iPad are never sent to the Mac. A five-finger pinch on the iPad is an iPadOS system gesture: it minimizes the receiver app on the iPad (starting the background grace period) and cannot trigger Launchpad on the Mac. No app can intercept iPadOS system gestures. The only iPad gesture YC Cast registers is a local three-finger tap that reveals the settings button.
+- Mac trackpad gestures (five-finger pinch for Launchpad, Mission Control, App Exposé, Spaces switching, multi-finger swipes) always remain native macOS gestures. ScreenBridge installs no event taps, no event monitors, and never changes `presentationOptions`, so it cannot block, swallow, or reinterpret them — before, during, or after a connection.
+- macOS applies these gestures to the display where the pointer currently is. If the pointer is on the ScreenBridge virtual display, Launchpad or Mission Control appears on that display (and is therefore visible on the iPad). That is standard macOS multi-display behavior — the same thing happens with a cabled external monitor — not input forwarding, and ScreenBridge does not override it.
+- Touches and gestures on the iPad are never sent to the Mac. A five-finger pinch on the iPad is an iPadOS system gesture: it minimizes the receiver app on the iPad (starting the background grace period) and cannot trigger Launchpad on the Mac. No app can intercept iPadOS system gestures. The only iPad gesture ScreenBridge registers is a local three-finger tap that reveals the settings button.
 - Copy/paste on the streamed display uses the Mac clipboard, because the virtual display is the Mac. Use the Mac keyboard and trackpad as usual.
 
 ## Security Model
@@ -58,21 +60,21 @@ The iPad is a second screen, not a second gesture controller. All control of the
 - Protocol v2 gives the media/control and Chrome-audio transports explicit roles under one receiver-generated session ID; an audio connection cannot create or join a stale video session.
 - A session key derived from the pairing secret and both nonces authenticates receiver control messages such as heartbeat and screen-size updates.
 - The Mac ignores iPad-originated pointer, scroll, touch, and keyboard input. Local Mac input remains the only control path.
-- Bonjour discovery uses the YC Cast service type `_yc-cast._tcp`.
+- Bonjour discovery uses the ScreenBridge service type `_yc-cast._tcp`.
 
-YC Cast still needs sensitive macOS permissions. Screen Recording is required to capture the virtual display, and Audio Recording is required only when app audio routing is enabled. Accessibility is not required for the display-only Mac-to-iPad workflow.
+ScreenBridge still needs sensitive macOS permissions. Screen Recording is required to capture the virtual display, and Audio Recording is required only when app audio routing is enabled. Accessibility is not required for the display-only Mac-to-iPad workflow.
 
 Video and audio frames are intended for trusted local networks and are not encrypted beyond the local transport. Use a private pairing code and avoid untrusted networks.
 
 ## Quick Start
 
-For this trusted, self-use workflow, a unique six-digit code is supported for convenience. It is not resistant to offline enumeration, so use YC Cast only on a trusted local network; use a longer generated code if that tradeoff is not acceptable. Save the exact same code on both devices.
+For this trusted, self-use workflow, a unique six-digit code is supported for convenience. It is not resistant to offline enumeration, so use ScreenBridge only on a trusted local network; use a longer generated code if that tradeoff is not acceptable. Save the exact same code on both devices.
 
 ### Mac
 
 1. Build the app with `./make_app.sh`, or open a release zip/DMG.
-2. Move `YC Cast.app` to `/Applications`.
-3. Open YC Cast and save the pairing code in Settings.
+2. Move `ScreenBridge.app` to `/Applications`.
+3. Open ScreenBridge and save the pairing code in Settings.
 4. Keep `Use as` set to `Extended Display`.
 5. Choose the network mode for the connection. `Auto` is easiest, `Force P2P (WiFi Direct)` is usually better for nearby wireless devices, and `USB / Thunderbolt Cable` is best when a cable path is active.
 6. Grant Screen Recording when prompted.
@@ -90,7 +92,7 @@ For this trusted, self-use workflow, a unique six-digit code is supported for co
 7. When the iPad appears in the Mac sidebar, connect from the Mac.
 
 The iPad receiver supports iPadOS multitasking and windowed presentation, so
-another iPad window can temporarily sit above it. YC Cast still reports the
+another iPad window can temporarily sit above it. ScreenBridge still reports the
 full physical iPad screen size to the Mac so the virtual display resolution
 does not shrink when the receiver window is resized.
 
@@ -158,7 +160,7 @@ Generated apps, DMGs, zips, and local sharing folders are ignored by Git and sho
 
 ## License
 
-YC Cast is released under the MIT License. See `LICENSE`.
+ScreenBridge is released under the MIT License. See `LICENSE`.
 
 Before public redistribution, resolve the source-provenance/license evidence
 tracked as K5 in `docs/audits/2026-08-15-change-review-known-issues.md`; the
@@ -172,7 +174,7 @@ runtime stability work does not settle that legal question.
 - The iPad shows the streamed virtual display.
 - On iPadOS with Stage Manager or Slide Over, another window can appear over the receiver without changing the Mac virtual display resolution.
 - Touch, pointer, scroll, and keyboard input on the iPad are not forwarded to the Mac.
-- Copy/paste remains a local OS behavior: use the Mac clipboard for the streamed Mac display, or Universal Clipboard outside YC Cast if your Apple devices provide it.
+- Copy/paste remains a local OS behavior: use the Mac clipboard for the streamed Mac display, or Universal Clipboard outside ScreenBridge if your Apple devices provide it.
 - P2P mode logs an AWDL path when Apple peer-to-peer networking is active.
 - USB / Thunderbolt Cable mode logs a wired/iPad USB path when the system selects that interface.
 - Chrome audio routing plays selected browser audio on the receiver when audio permissions are granted.
@@ -193,7 +195,7 @@ runtime stability work does not settle that legal question.
 
 The shared security code lives in `Sources/BetterCastShared`:
 
-- `PrivateBetterCastConstants.swift` holds the YC Cast service type and protocol constants.
+- `PrivateBetterCastConstants.swift` holds the ScreenBridge service type and protocol constants.
 - `PairingAuthenticator.swift` implements nonce generation, HMAC proofs, session key derivation, and authenticated envelopes.
 - `PairingSecretStore.swift` stores the local pairing secret through Keychain.
 - `ReceiverSessionPolicy.swift`, `PipelineUpdatePolicy.swift`, `MediaLivenessEvaluator`, and `AdaptiveBitratePolicy` hold testable state/health decisions used by the runtime.
@@ -205,6 +207,6 @@ The main runtime gates are:
 - Receiver commands: `NetworkClient.receiveTCP(...)` accepts authenticated heartbeat/keyframe/screen-size messages while ignoring iPad input events.
 - iPad control: `VideoRendererViewIOS` is display-only and does not register touch-control gestures.
 
-Some internal Swift package targets and source paths still use historical `BetterCast*` names. The user-facing app name, bundle display name, service type, packaging scripts, and release documentation are YC Cast.
+Some internal Swift package targets and source paths still use historical `BetterCast*` names. The user-facing app name, bundle display name, service type, packaging scripts, and release documentation are ScreenBridge.
 
 See `docs/decisions/ADR-002-display-only-local-mac-control.md`, `ADR-003-logical-receiver-session.md`, and `ADR-004-independent-media-health-and-bounded-delivery.md` for the current runtime decisions.

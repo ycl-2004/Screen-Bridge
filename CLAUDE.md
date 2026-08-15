@@ -1,17 +1,17 @@
-# YC Cast / BetterCast Project Entry
+# ScreenBridge / BetterCast Project Entry
 
 Use this file as the first stop when handing the repository to Claude Code or another coding agent. It explains what the project is, which path is current, where the important code lives, and how the remaining modules relate to the main product.
 
 ## One-Line Summary
 
-YC Cast turns an iPad into a display-only extended screen for a Mac. The Mac creates a virtual display, captures it, encodes video/audio, and streams it over a local authenticated connection to an iPad receiver.
+ScreenBridge turns an iPad into a display-only extended screen for a Mac. The Mac creates a virtual display, captures it, encodes video/audio, and streams it over a local authenticated connection to an iPad receiver.
 
 ## Naming Reality
 
-- User-facing product name: `YC Cast`.
+- User-facing product name: `ScreenBridge`.
 - Historical source/package name: `BetterCast`.
 - Many Swift targets, folders, Android packages, and C++ files still use `BetterCast*`.
-- Do not assume `BetterCast` means a separate product. In this repository it is mostly legacy naming for the YC Cast codebase.
+- Do not assume `BetterCast` means a separate product. In this repository it is mostly legacy naming for the ScreenBridge codebase.
 
 ## Current Product Path
 
@@ -145,7 +145,7 @@ Package IPA after building:
 
 Path: `Sources/BetterCastReceiver/`
 
-This is a Swift receiver target separate from the current iPad receiver. It is useful as protocol/reference code, but it is not the main YC Cast product path described in the README.
+This is a Swift receiver target separate from the current iPad receiver. It is useful as protocol/reference code, but it is not the main ScreenBridge product path described in the README.
 
 ### Android Receiver/Sender
 
@@ -153,7 +153,7 @@ Path: `Sources/BetterCastReceiverAndroid/`
 
 This is a Kotlin/Jetpack Compose Android module under the historical BetterCast package name. It has receiver networking, sender/screen-capture code, input models, and Android-specific UI.
 
-Use it only when the task is explicitly Android-related. For the current YC Cast Mac+iPad workflow, treat Android as dormant/secondary.
+Use it only when the task is explicitly Android-related. For the current ScreenBridge Mac+iPad workflow, treat Android as dormant/secondary.
 
 Potential command from the Android folder:
 
@@ -261,7 +261,7 @@ For Windows/Linux desktop work, follow `Sources/BetterCastReceiverDesktop/BUILD.
 ## Agent Notes
 
 - Prefer small, scoped changes. This repository mixes active and dormant modules.
-- Preserve the current user-facing `YC Cast` wording unless the task is explicitly about renaming internal code.
+- Preserve the current user-facing `ScreenBridge` wording unless the task is explicitly about renaming internal code.
 - Do not do broad internal renames from `BetterCast*` to `YCCast*` as an incidental cleanup.
 - If changing behavior or setup, update `README.md` or an ADR as appropriate.
 - If changing security semantics, update tests under `Tests/BetterCastSharedTests/` and the relevant ADR.
