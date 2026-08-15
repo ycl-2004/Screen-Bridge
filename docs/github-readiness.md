@@ -10,7 +10,7 @@ This repository is close to being presentable as YC Cast, but there are two diff
 - Generated distribution artifacts are ignored through `/dist/`, `*.app`, `*.dmg`, `*.ipa`, and related build rules.
 - The user-facing macOS and iOS bundle display names are `YC Cast`.
 - The local discovery service is `_yc-cast._tcp`.
-- The repository license has been changed to MIT for this project.
+- The repository declares MIT, but the source-provenance compatibility question tracked as K5 still requires owner/legal evidence before public redistribution.
 - Release notes now describe the current YC Cast v8 work instead of old product history.
 
 ## Still Worth Doing Before A Fully Public Launch
@@ -19,6 +19,7 @@ This repository is close to being presentable as YC Cast, but there are two diff
 - Remove or archive dormant Android, Windows, Linux, and desktop receiver modules if YC Cast will stay Mac+iPad only.
 - Add a GitHub release workflow after you have a Developer ID certificate and notarization credentials.
 - Add screenshots or a short demo GIF to the README after the UI is stable.
+- Resolve K5 in `docs/audits/2026-08-15-change-review-known-issues.md` before treating the current license declaration as public-release clearance.
 
 ## Release Asset Policy
 

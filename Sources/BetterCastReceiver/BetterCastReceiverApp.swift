@@ -3,6 +3,7 @@ import Network
 import CoreMedia
 import AppKit
 import Security
+import UniformTypeIdentifiers
 
 
 @main
@@ -185,7 +186,7 @@ struct BetterCastReceiverApp: App {
 
     private func saveLogs() {
         let panel = NSSavePanel()
-        panel.allowedFileTypes = ["txt"]
+        panel.allowedContentTypes = [.plainText]
         panel.nameFieldStringValue = "BetterCast_Receiver_Logs.txt"
         
         if panel.runModal() == .OK, let url = panel.url {

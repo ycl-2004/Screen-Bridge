@@ -7,23 +7,67 @@ public enum PairingAuthError: Error, Equatable {
     case invalidEnvelope
 }
 
+/// A receiver session has exactly one media/control transport. An optional
+/// audio transport may join it after the media transport is authenticated.
+public enum StreamConnectionRole: String, Codable, Equatable, Sendable {
+    case mediaControl
+    case audio
+}
+
+/// Display facts the sender needs before it creates a virtual display.
+/// Sending these inside the handshake prevents a temporary default-sized
+/// display from being created and immediately replaced after connection.
+public struct ReceiverCapabilities: Codable, Equatable, Sendable {
+    public let pixelWidth: Int
+    public let pixelHeight: Int
+
+    public init(pixelWidth: Int, pixelHeight: Int) {
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+    }
+
+    public var isValid: Bool {
+        pixelWidth > 0 && pixelHeight > 0
+    }
+}
+
 public struct SenderHello: Codable, Equatable {
     public let version: UInt8
     public let senderNonce: Data
+    public let role: StreamConnectionRole
+    /// Nil for a new media/control connection. The receiver creates the
+    /// logical session and returns its ID. Auxiliary transports must send it.
+    public let sessionID: UUID?
 
-    public init(version: UInt8 = PrivateBetterCastConstants.protocolVersion, senderNonce: Data) {
+    public init(
+        version: UInt8 = PrivateBetterCastConstants.protocolVersion,
+        senderNonce: Data,
+        role: StreamConnectionRole = .mediaControl,
+        sessionID: UUID? = nil
+    ) {
         self.version = version
         self.senderNonce = senderNonce
+        self.role = role
+        self.sessionID = sessionID
     }
 }
 
 public struct ReceiverHello: Codable, Equatable {
     public let receiverNonce: Data
     public let receiverProof: Data
+    public let sessionID: UUID
+    public let capabilities: ReceiverCapabilities?
 
-    public init(receiverNonce: Data, receiverProof: Data) {
+    public init(
+        receiverNonce: Data,
+        receiverProof: Data,
+        sessionID: UUID,
+        capabilities: ReceiverCapabilities? = nil
+    ) {
         self.receiverNonce = receiverNonce
         self.receiverProof = receiverProof
+        self.sessionID = sessionID
+        self.capabilities = capabilities
     }
 }
 

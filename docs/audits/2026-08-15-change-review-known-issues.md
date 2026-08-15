@@ -4,7 +4,17 @@
 
 审查基线：`main` / `adfdd5f3d9104b300c675c77936360adc6d3f33a`
 
-状态：项目所有者明确要求保留以下问题、记录现状，并继续提交到公开的 `origin/main`。这表示本次推送接受当前风险，不表示问题已经解决，也不授权未来发布自动忽略这些问题。
+状态：本文件保留当时的风险接受记录；下面 K1–K5 的“未修复”描述是该次提交时的历史快照。其后修复状态见紧接着的更新，不应再把全部五项视为开放。
+
+## 后续修复更新（2026-08-15）
+
+- **K1 已修复**：Reset Pairing 现在停止 listener、取消 active/pending 主连接与音频连接、清空 session/framing/decoder/audio/watchdog 状态，并回到 `pairingRequired` UI。
+- **K2 已修复**：连接一经接受即在 `networkQueue` 上原子占位；timeout、失败、取消和握手完成都通过同一个字典恰好释放一次。
+- **K3 按产品边界接受**：项目所有者明确选择自用 6 位配对体验；PAKE、离线枚举防护和 hostile-LAN hardening 不在本轮范围。仅在可信局域网使用。
+- **K4 已修复**：链路分类改为连接时的明确 route intent 加 `NWPath.usesInterfaceType`；不再读取 `availableInterfaces.first`。无法证明 P2P 时落入保守 infrastructure 档；所有 TCP 路径均有界背压并动态调码率。
+- **K5 仍开放**：公开分发前仍需项目所有者或合资格律师确认上游权利与当前 MIT 声明的兼容证据。
+
+本轮新增验证包括 protocol v2 role/session/capabilities、媒体分层存活、session admission、设置更新决策、自适应码率策略测试，以及无 warning 的 Mac Swift build 和 iPad-only scene-based iOS Simulator build。真机音视频/AWDL/有线、Developer ID 公证和导出 IPA 安装仍需物理设备与签名账号验证。
 
 ## 本次改动摘要
 

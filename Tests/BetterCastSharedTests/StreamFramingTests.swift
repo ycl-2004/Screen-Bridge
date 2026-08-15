@@ -1,6 +1,109 @@
 import XCTest
 @testable import BetterCastShared
 
+final class MediaLivenessEvaluatorTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_000)
+    private let timeout: TimeInterval = 8
+
+    func testStaticRenderedScreenStaysHealthyWithMediaHeartbeat() {
+        let snapshot = makeSnapshot(
+            heartbeat: now.addingTimeInterval(-1),
+            accessUnit: now.addingTimeInterval(-30),
+            decoded: now.addingTimeInterval(-29),
+            rendered: now.addingTimeInterval(-29),
+            hasDecoded: true,
+            hasRendered: true
+        )
+
+        XCTAssertNil(MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout))
+    }
+
+    func testStoppedHeartbeatFailsEvenWhenAudioOrOldFrameExists() {
+        let snapshot = makeSnapshot(
+            heartbeat: now.addingTimeInterval(-9),
+            accessUnit: now.addingTimeInterval(-1),
+            decoded: now.addingTimeInterval(-1),
+            rendered: now.addingTimeInterval(-1),
+            hasDecoded: true,
+            hasRendered: true
+        )
+
+        XCTAssertEqual(
+            MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout),
+            .transportHeartbeatStopped
+        )
+    }
+
+    func testSessionWithoutFirstRenderedFrameFails() {
+        let snapshot = makeSnapshot(
+            heartbeat: now,
+            accessUnit: .distantPast,
+            decoded: .distantPast,
+            rendered: .distantPast,
+            hasDecoded: false,
+            hasRendered: false,
+            sessionStarted: now.addingTimeInterval(-9)
+        )
+
+        XCTAssertEqual(
+            MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout),
+            .noDecodableFirstFrame
+        )
+    }
+
+    func testIncomingVideoBytesDoNotMaskDecoderStall() {
+        let snapshot = makeSnapshot(
+            heartbeat: now,
+            accessUnit: now.addingTimeInterval(-1),
+            decoded: now.addingTimeInterval(-10),
+            rendered: now.addingTimeInterval(-10),
+            hasDecoded: true,
+            hasRendered: true
+        )
+
+        XCTAssertEqual(
+            MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout),
+            .decoderStalled
+        )
+    }
+
+    func testDecodedFrameDoesNotMaskRendererStall() {
+        let snapshot = makeSnapshot(
+            heartbeat: now,
+            accessUnit: now.addingTimeInterval(-1),
+            decoded: now.addingTimeInterval(-1),
+            rendered: now.addingTimeInterval(-10),
+            hasDecoded: true,
+            hasRendered: true
+        )
+
+        XCTAssertEqual(
+            MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout),
+            .rendererStalled
+        )
+    }
+
+    private func makeSnapshot(
+        heartbeat: Date,
+        accessUnit: Date,
+        decoded: Date,
+        rendered: Date,
+        hasDecoded: Bool,
+        hasRendered: Bool,
+        sessionStarted: Date? = nil
+    ) -> MediaLivenessSnapshot {
+        MediaLivenessSnapshot(
+            sessionStartedAt: sessionStarted ?? now.addingTimeInterval(-30),
+            lastMediaHeartbeat: heartbeat,
+            lastVideoAccessUnitReceived: accessUnit,
+            lastVideoDecoded: decoded,
+            lastVideoRendered: rendered,
+            hasDecodedFrame: hasDecoded,
+            hasRenderedFrame: hasRendered
+        )
+    }
+}
+
 /// Bounds checks for the length-prefixed wire protocol.
 ///
 /// Before these existed, every `receive` path took the raw `UInt32` length from

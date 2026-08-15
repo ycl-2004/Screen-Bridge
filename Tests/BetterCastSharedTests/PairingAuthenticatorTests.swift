@@ -2,6 +2,68 @@ import XCTest
 @testable import BetterCastShared
 
 final class PairingAuthenticatorTests: XCTestCase {
+    func testProtocolVersionIncludesSessionRolesAndCapabilities() {
+        XCTAssertEqual(PrivateBetterCastConstants.protocolVersion, 2)
+    }
+
+    func testMediaHelloStartsWithoutSessionAndRoundTrips() throws {
+        let hello = SenderHello(
+            senderNonce: Data("sender".utf8),
+            role: .mediaControl
+        )
+
+        let decoded = try JSONDecoder().decode(
+            SenderHello.self,
+            from: JSONEncoder().encode(hello)
+        )
+
+        XCTAssertEqual(decoded, hello)
+        XCTAssertNil(decoded.sessionID)
+    }
+
+    func testAudioHelloJoinsExistingSessionAndRoundTrips() throws {
+        let sessionID = UUID()
+        let hello = SenderHello(
+            senderNonce: Data("audio".utf8),
+            role: .audio,
+            sessionID: sessionID
+        )
+
+        let decoded = try JSONDecoder().decode(
+            SenderHello.self,
+            from: JSONEncoder().encode(hello)
+        )
+
+        XCTAssertEqual(decoded.role, .audio)
+        XCTAssertEqual(decoded.sessionID, sessionID)
+    }
+
+    func testReceiverHelloCarriesSessionAndDisplayCapabilities() throws {
+        let sessionID = UUID()
+        let hello = ReceiverHello(
+            receiverNonce: Data("receiver".utf8),
+            receiverProof: Data("proof".utf8),
+            sessionID: sessionID,
+            capabilities: ReceiverCapabilities(pixelWidth: 2688, pixelHeight: 2016)
+        )
+
+        let decoded = try JSONDecoder().decode(
+            ReceiverHello.self,
+            from: JSONEncoder().encode(hello)
+        )
+
+        XCTAssertEqual(decoded, hello)
+        XCTAssertEqual(decoded.sessionID, sessionID)
+        XCTAssertEqual(decoded.capabilities?.pixelWidth, 2688)
+        XCTAssertEqual(decoded.capabilities?.pixelHeight, 2016)
+        XCTAssertTrue(decoded.capabilities?.isValid == true)
+    }
+
+    func testReceiverCapabilitiesRejectNonPositiveDimensions() {
+        XCTAssertFalse(ReceiverCapabilities(pixelWidth: 0, pixelHeight: 2016).isValid)
+        XCTAssertFalse(ReceiverCapabilities(pixelWidth: 2688, pixelHeight: -1).isValid)
+    }
+
     func testReceiverProofAuthenticatesWithSameSecretAndNonces() {
         let secret = PairingAuthenticator.normalizedSecret(from: "123-456")
         let senderNonce = Data("sender".utf8)

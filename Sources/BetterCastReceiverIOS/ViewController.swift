@@ -52,6 +52,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
         listener.delegate = self
         listener.setup(decoder: decoder, renderer: renderer)
+        publishReceiverCapabilities()
 
         startListenerIfPaired()
 
@@ -73,6 +74,14 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChangeFrame), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillHide), name: UIResponder.keyboardWillHideNotification, object: nil)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // The scene/window relationship is authoritative only after the view is
+        // onscreen. Republish in case the early handshake used the bounds-based
+        // fallback during launch.
+        publishReceiverCapabilities()
     }
 
     // Background grace: tell the sender we're backgrounding so it holds the
@@ -127,13 +136,45 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         let screenSize = fullScreenPixelSizeForCurrentOrientation()
         let width = Int(screenSize.width)
         let height = Int(screenSize.height)
+        networkListener?.updateReceiverCapabilities(pixelWidth: width, pixelHeight: height)
         LogManager.shared.log("ViewController: Sending screen info \(width)x\(height)")
         let event = InputEvent(type: .command, keyCode: 777, deltaX: Double(width), deltaY: Double(height))
         networkListener?.sendInputEvent(event)
     }
 
+    private func publishReceiverCapabilities() {
+        let screenSize = fullScreenPixelSizeForCurrentOrientation()
+        networkListener?.updateReceiverCapabilities(
+            pixelWidth: Int(screenSize.width),
+            pixelHeight: Int(screenSize.height)
+        )
+    }
+
+    /// The scene backing this receiver, usable before `view.window` is set.
+    ///
+    /// Capabilities are published from `viewDidLoad`, which runs while the root
+    /// view controller is being installed and therefore before it has a window.
+    /// Falling straight through to the bounds-based estimate there reported
+    /// points instead of pixels, and the sender sized the Mac's virtual display
+    /// from that wrong number.
+    private func activeWindowScene() -> UIWindowScene? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+            ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    }
+
     private func fullScreenPixelSizeForCurrentOrientation() -> CGSize {
-        let nativeSize = UIScreen.main.nativeBounds.size
+        let nativeSize: CGSize
+        if let screen = view.window?.windowScene?.screen ?? activeWindowScene()?.screen {
+            nativeSize = screen.nativeBounds.size
+        } else {
+            let scale = max(traitCollection.displayScale, 1)
+            nativeSize = CGSize(
+                width: view.bounds.width * scale,
+                height: view.bounds.height * scale
+            )
+        }
         let longEdge = max(nativeSize.width, nativeSize.height)
         let shortEdge = min(nativeSize.width, nativeSize.height)
 
@@ -143,7 +184,8 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     }
 
     private var isCurrentInterfaceLandscape: Bool {
-        if #available(iOS 13.0, *), let orientation = view.window?.windowScene?.interfaceOrientation {
+        if let orientation = view.window?.windowScene?.interfaceOrientation
+            ?? activeWindowScene()?.interfaceOrientation {
             return orientation.isLandscape
         }
 
@@ -155,7 +197,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             return false
         }
 
-        return UIScreen.main.bounds.width > UIScreen.main.bounds.height
+        return view.bounds.width > view.bounds.height
     }
 
     @objc private func orientationChanged() {
@@ -674,13 +716,32 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     @objc private func clearPairingCode() {
         do {
             try pairingSecretStore.deleteSecret()
-            statusLabel.text = "Pairing cleared"
-            pulseView.backgroundColor = UIColor.systemOrange
             LogManager.shared.log("ViewController: Pairing cleared")
+            networkListener?.resetPairingSession { [weak self] in
+                self?.showPairingRequiredState()
+            }
         } catch {
             statusLabel.text = "Pairing clear failed"
             LogManager.shared.log("ViewController: Pairing clear failed")
         }
+    }
+
+    private func showPairingRequiredState() {
+        isConnected = false
+        updateIdleTimer(isStreaming: false)
+        renderer.clear()
+        hideDisconnectedNotice()
+        statusLabel.text = "Enter pairing code"
+        statusLabel.textColor = UIColor.white.withAlphaComponent(0.85)
+        pulseView.layer.removeAllAnimations()
+        pulseView.alpha = 1.0
+        pulseView.backgroundColor = UIColor.systemOrange
+        onboardingView.isHidden = false
+        onboardingView.alpha = 1.0
+        view.bringSubviewToFront(onboardingView)
+        view.bringSubviewToFront(settingsButtonBlur)
+        view.bringSubviewToFront(settingsButton)
+        pairingCodeField.text = ""
     }
 
     @objc private func deviceNameChanged() {
@@ -719,21 +780,12 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         settingsButton.translatesAutoresizingMaskIntoConstraints = false
         settingsButtonBlur.contentView.addSubview(settingsButton)
 
-        if #available(iOS 11.0, *) {
-            NSLayoutConstraint.activate([
-                settingsButtonBlur.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-                settingsButtonBlur.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -8),
-                settingsButtonBlur.widthAnchor.constraint(equalToConstant: 44),
-                settingsButtonBlur.heightAnchor.constraint(equalToConstant: 44),
-            ])
-        } else {
-            NSLayoutConstraint.activate([
-                settingsButtonBlur.topAnchor.constraint(equalTo: view.topAnchor, constant: 28),
-                settingsButtonBlur.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-                settingsButtonBlur.widthAnchor.constraint(equalToConstant: 44),
-                settingsButtonBlur.heightAnchor.constraint(equalToConstant: 44),
-            ])
-        }
+        NSLayoutConstraint.activate([
+            settingsButtonBlur.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            settingsButtonBlur.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -8),
+            settingsButtonBlur.widthAnchor.constraint(equalToConstant: 44),
+            settingsButtonBlur.heightAnchor.constraint(equalToConstant: 44),
+        ])
         NSLayoutConstraint.activate([
             settingsButton.topAnchor.constraint(equalTo: settingsButtonBlur.contentView.topAnchor),
             settingsButton.bottomAnchor.constraint(equalTo: settingsButtonBlur.contentView.bottomAnchor),
@@ -939,6 +991,9 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         updateIdleTimer(isStreaming: state == .connected)
 
         switch state {
+        case .pairingRequired:
+            showPairingRequiredState()
+
         case .connected:
             hideDisconnectedNotice()
             // Stop pulse, show green dot, then dismiss onboarding

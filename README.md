@@ -10,8 +10,8 @@ The current product path is a macOS sender plus an iPadOS receiver.
 - Default display placement on the right side of the Mac display, with a setting for right, left, above, or below.
 - HiDPI resolution presets, including a larger-text `1024 x 768` option for easier reading on iPad.
 - Network modes for Auto, Apple P2P/AWDL, Router/WiFi, and USB/Thunderbolt-style wired paths.
-- Adaptive stream quality: wired and Apple P2P paths can run at 60 FPS and higher bitrate, while router WiFi is capped for stability.
-- Optional Chrome audio routing to the receiver so selected browser audio can play on the iPad instead of the Mac.
+- Adaptive stream quality: every TCP path has bounded backpressure and adjusts bitrate from observed send latency/drops without exceeding the selected quality.
+- Optional Chrome audio routing to the receiver, with bounded low-latency delivery, visible waiting/connecting/streaming/retry state, and automatic recovery when Chrome restarts or changes audio processes.
 - Pairing-code based authentication before streaming starts.
 - Display-only receiver behavior: iPad touch gestures are not forwarded as Mac input.
 - Device de-duplication, hidden device records, and manual device removal.
@@ -20,7 +20,7 @@ The current product path is a macOS sender plus an iPadOS receiver.
 - Background grace period: backgrounding the iPad receiver pauses the stream for up to 5 minutes without destroying the Mac virtual display; returning resumes the session in place.
 - Fast stream recovery: the iPad requests a fresh keyframe after decode errors and when returning to the foreground.
 - Clear connection states on both sides: the Mac sidebar shows a live status indicator (discovering, connecting, authenticating, connected, reconnecting, failed), and the iPad distinguishes waiting, connecting, connected, device disconnected, and connection lost.
-- The iPad never freezes on the last video frame: a stream watchdog detects silent connection loss (Mac crash, power loss, network drop) within ~8 seconds and shows an explicit "Connection lost" screen, and every disconnect clears the old frame.
+- The iPad never treats unrelated bytes as a healthy picture: heartbeat, video arrival, decode, and renderer progress are tracked independently. A static rendered desktop stays healthy through the media heartbeat, while real decoder/renderer stalls surface as connection loss.
 
 ## Network Modes
 
@@ -39,7 +39,8 @@ For the best second-screen experience, prefer `USB / Thunderbolt Cable` when ava
 - Force-quitting the receiver, disconnecting manually on either device, or a real network failure skips the grace period and disconnects immediately.
 - iPadOS system gestures (app switcher, Slide Over, Stage Manager) only change how the receiver app is presented on the iPad. They are never forwarded to the Mac. Mac-side gestures such as Mission Control change the streamed content because the iPad shows a real Mac display.
 - After an unexpected wireless drop the Mac retries the connection 3 times with backoff. The sender log shows `Auto-reconnect to ... in Ns`. If all attempts fail, reconnect manually from the sidebar.
-- For diagnosing drops, the sender log records the connection path (`P2P Direct Link (AWDL) Active` vs `Likely using Router/Infrastructure`), path viability changes, and the disconnect reason (heartbeat timeout, transport failure, or receive error).
+- For diagnosing drops, the sender log records the connection class (`P2P Direct Link (AWDL)`, `Wired/cable link`, or `Router/infrastructure link`), bitrate adjustments, and the disconnect reason.
+- If discovery was denied, YC Cast retries Bonjour with bounded backoff and then exposes `Local Network Settings…` plus `Retry Discovery` in Settings.
 
 ## Gestures
 
@@ -54,6 +55,7 @@ The iPad is a second screen, not a second gesture controller. All control of the
 
 - Pairing codes are normalized, hashed, and stored locally in Keychain on both Mac and iPad.
 - Mac and iPad perform a nonce-based HMAC-SHA256 handshake before streaming starts.
+- Protocol v2 gives the media/control and Chrome-audio transports explicit roles under one receiver-generated session ID; an audio connection cannot create or join a stale video session.
 - A session key derived from the pairing secret and both nonces authenticates receiver control messages such as heartbeat and screen-size updates.
 - The Mac ignores iPad-originated pointer, scroll, touch, and keyboard input. Local Mac input remains the only control path.
 - Bonjour discovery uses the YC Cast service type `_yc-cast._tcp`.
@@ -64,7 +66,7 @@ Video and audio frames are intended for trusted local networks and are not encry
 
 ## Quick Start
 
-Use a long pairing code that is not reused anywhere else. Save the exact same code on both devices.
+For this trusted, self-use workflow, a unique six-digit code is supported for convenience. It is not resistant to offline enumeration, so use YC Cast only on a trusted local network; use a longer generated code if that tradeoff is not acceptable. Save the exact same code on both devices.
 
 ### Mac
 
@@ -103,8 +105,12 @@ swift test --filter BetterCastSharedTests
 Build the Mac app and DMG locally:
 
 ```bash
-env SIGN_IDENTITY=- ./make_app.sh
+ALLOW_AD_HOC=1 ./make_app.sh
 ```
+
+This explicit opt-in is for disposable local testing. Use an Apple-issued
+signing identity for a build whose macOS Local Network permission identity must
+remain stable.
 
 Build the iPad receiver for a real device:
 
@@ -122,7 +128,9 @@ For a local iPad install, open `BetterCastIOS.xcodeproj`, choose the real iPad a
 
 ## Distribution Notes
 
-`make_app.sh` defaults to ad-hoc signing when `SIGN_IDENTITY=-`, which is useful for local testing and sharing with trusted friends. For a smoother public download experience, sign with your own Developer ID certificate and notarize the DMG:
+`make_app.sh` requires an Apple-issued signing identity by default. Ad-hoc
+signing is available only with `ALLOW_AD_HOC=1` and must not be published. For a
+downloadable build, sign with a Developer ID certificate and notarize the DMG:
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
@@ -132,11 +140,29 @@ TEAM_ID="TEAMID" \
 ./make_app.sh
 ```
 
+The iOS packaging script uses Xcode's archive/export pipeline; it no longer
+assembles an unsigned app bundle by hand. Supply an export-options plist whose
+method matches your Apple account:
+
+```bash
+EXPORT_OPTIONS_PLIST=/absolute/path/ExportOptions.plist \
+ALLOW_PROVISIONING_UPDATES=1 \
+./package_ios_ipa.sh
+```
+
+A free Personal Team still limits device installs to Apple's short-lived
+development provisioning period; rebuild and reinstall when that profile
+expires.
+
 Generated apps, DMGs, zips, and local sharing folders are ignored by Git and should be uploaded as GitHub release assets instead of committed to the repository.
 
 ## License
 
 YC Cast is released under the MIT License. See `LICENSE`.
+
+Before public redistribution, resolve the source-provenance/license evidence
+tracked as K5 in `docs/audits/2026-08-15-change-review-known-issues.md`; the
+runtime stability work does not settle that legal question.
 
 ## Manual Acceptance Checklist
 
@@ -150,7 +176,9 @@ YC Cast is released under the MIT License. See `LICENSE`.
 - P2P mode logs an AWDL path when Apple peer-to-peer networking is active.
 - USB / Thunderbolt Cable mode logs a wired/iPad USB path when the system selects that interface.
 - Chrome audio routing plays selected browser audio on the receiver when audio permissions are granted.
+- Enabling Chrome audio before Chrome starts shows `Waiting for Chrome` and begins streaming automatically after Chrome appears; restarting Chrome recovers without recreating the virtual display.
 - Clearing pairing on either device prevents future connections until the code is saved again.
+- Reset Pairing on the iPad immediately revokes the active and pending logical session, stops listening, clears media state, and returns to pairing UI.
 - Stop Sharing on the Mac returns the iPad to the disconnected screen.
 - After a forced wireless interruption (e.g. toggling iPad WiFi briefly), the Mac auto-reconnects within ~15 seconds of the network returning.
 - A manual disconnect from the Mac sidebar does not trigger auto-reconnect.
@@ -168,14 +196,15 @@ The shared security code lives in `Sources/BetterCastShared`:
 - `PrivateBetterCastConstants.swift` holds the YC Cast service type and protocol constants.
 - `PairingAuthenticator.swift` implements nonce generation, HMAC proofs, session key derivation, and authenticated envelopes.
 - `PairingSecretStore.swift` stores the local pairing secret through Keychain.
+- `ReceiverSessionPolicy.swift`, `PipelineUpdatePolicy.swift`, `MediaLivenessEvaluator`, and `AdaptiveBitratePolicy` hold testable state/health decisions used by the runtime.
 
 The main runtime gates are:
 
 - Mac: `NetworkClient.performPairingHandshake(...)` must succeed before `startPipeline(for:)`.
-- iPad: `NetworkListenerIOS.performPairingHandshake(...)` must succeed before a connection is added to `connectedClients`.
+- iPad: `NetworkListenerIOS.performPairingHandshake(...)` must succeed before a main session is activated or an auxiliary audio transport is admitted to that session.
 - Receiver commands: `NetworkClient.receiveTCP(...)` accepts authenticated heartbeat/keyframe/screen-size messages while ignoring iPad input events.
 - iPad control: `VideoRendererViewIOS` is display-only and does not register touch-control gestures.
 
 Some internal Swift package targets and source paths still use historical `BetterCast*` names. The user-facing app name, bundle display name, service type, packaging scripts, and release documentation are YC Cast.
 
-See `docs/decisions/ADR-002-display-only-local-mac-control.md` for the current display-only design rationale.
+See `docs/decisions/ADR-002-display-only-local-mac-control.md`, `ADR-003-logical-receiver-session.md`, and `ADR-004-independent-media-health-and-bounded-delivery.md` for the current runtime decisions.

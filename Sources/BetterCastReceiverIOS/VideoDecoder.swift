@@ -16,14 +16,28 @@ extension VideoDecoderDelegate {
     func didFailToDecodeFrame(status: OSStatus) {}
 }
 
+private final class VideoDecoderCallbackContext {
+    weak var decoder: VideoDecoder?
+    let generation: UInt64
+
+    init(decoder: VideoDecoder, generation: UInt64) {
+        self.decoder = decoder
+        self.generation = generation
+    }
+}
+
 class VideoDecoder {
     
     weak var delegate: VideoDecoderDelegate?
     private var decompressionSession: VTDecompressionSession?
+    private let decoderQueue = DispatchQueue(label: "com.yccast.video-decoder.lifecycle")
+    private let decoderQueueKey = DispatchSpecificKey<UInt8>()
+    private var generation: UInt64 = 0
+    private var callbackContext: VideoDecoderCallbackContext?
     
     deinit {
-        if let session = decompressionSession {
-            VTDecompressionSessionInvalidate(session)
+        syncOnDecoderQueue {
+            invalidateCurrentSession()
         }
         LogManager.shared.log("VideoDecoder: Deallocated")
     }
@@ -33,10 +47,22 @@ class VideoDecoder {
     // NALU buffer management
     private var sps: Data?
     private var pps: Data?
+    private var configuredSPS: Data?
+    private var configuredPPS: Data?
     
     private var timeOffset: Double = 0
     
+    init() {
+        decoderQueue.setSpecific(key: decoderQueueKey, value: 1)
+    }
+
     func decode(data: Data) {
+        decoderQueue.async { [weak self] in
+            self?.decodeOnQueue(data: data)
+        }
+    }
+
+    private func decodeOnQueue(data: Data) {
         // Expected format: [PTS: 8 bytes][AVCC NALUs...]
         guard let payload = StreamFraming.splitVideoPayload(data) else { return }
 
@@ -48,7 +74,7 @@ class VideoDecoder {
         guard !parsed.isMalformed else {
             LogManager.shared.log("VideoDecoder: Dropped malformed access unit (\(payload.accessUnit.count) bytes)")
             // Ask for a fresh keyframe rather than feeding VideoToolbox garbage.
-            delegate?.didFailToDecodeFrame(status: kVTVideoDecoderBadDataErr)
+            reportDecodeFailure(status: kVTVideoDecoderBadDataErr)
             return
         }
 
@@ -67,19 +93,42 @@ class VideoDecoder {
     /// Without this, reconnecting reused SPS/PPS and the decompression session
     /// from the previous session, which produced artifacts until the next GOP.
     func reset() {
+        syncOnDecoderQueue {
+            invalidateCurrentSession()
+            formatDescription = nil
+            sps = nil
+            pps = nil
+            configuredSPS = nil
+            configuredPPS = nil
+            timeOffset = 0
+        }
+        LogManager.shared.log("VideoDecoder: Reset for new session")
+    }
+
+    private func syncOnDecoderQueue<T>(_ work: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: decoderQueueKey) != nil {
+            return work()
+        }
+        return decoderQueue.sync(execute: work)
+    }
+
+    private func invalidateCurrentSession() {
+        generation &+= 1
         if let session = decompressionSession {
+            VTDecompressionSessionWaitForAsynchronousFrames(session)
             VTDecompressionSessionInvalidate(session)
         }
         decompressionSession = nil
-        formatDescription = nil
-        sps = nil
-        pps = nil
-        timeOffset = 0
-        LogManager.shared.log("VideoDecoder: Reset for new session")
+        callbackContext = nil
     }
     
     private func createDecompressionSessionIfReady() {
         guard let sps = sps, let pps = pps else { return }
+        if decompressionSession != nil,
+           configuredSPS == sps,
+           configuredPPS == pps {
+            return
+        }
         
         let parameterSets = [sps, pps]
         let parameterSetPointers = parameterSets.map { ($0 as NSData).bytes.bindMemory(to: UInt8.self, capacity: $0.count) }
@@ -100,18 +149,18 @@ class VideoDecoder {
             return
         }
         
-        // Detect dimension changes (orientation switch) — recreate session
-        var needsNewSession = (decompressionSession == nil)
+        // Parameter sets may change without a dimension change. Recreate for
+        // either case so the decoder never runs with stale codec state.
+        var needsNewSession = decompressionSession == nil
         if let oldFormat = self.formatDescription, decompressionSession != nil {
             let oldDim = CMVideoFormatDescriptionGetDimensions(oldFormat)
             let newDim = CMVideoFormatDescriptionGetDimensions(formatDesc)
             if oldDim.width != newDim.width || oldDim.height != newDim.height {
                 LogManager.shared.log("VideoDecoder: Dimensions changed \(oldDim.width)x\(oldDim.height) -> \(newDim.width)x\(newDim.height), recreating session")
-                VTDecompressionSessionInvalidate(decompressionSession!)
-                decompressionSession = nil
-                timeOffset = 0
-                needsNewSession = true
             }
+            needsNewSession = true
+            invalidateCurrentSession()
+            timeOffset = 0
         }
 
         self.formatDescription = formatDesc
@@ -124,9 +173,12 @@ class VideoDecoder {
                 kCVPixelBufferOpenGLCompatibilityKey as String: true
             ]
 
+            generation &+= 1
+            let context = VideoDecoderCallbackContext(decoder: self, generation: generation)
+            callbackContext = context
             var outputCallback = VTDecompressionOutputCallbackRecord(
                 decompressionOutputCallback: decompressionCallback,
-                decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
+                decompressionOutputRefCon: Unmanaged.passUnretained(context).toOpaque()
             )
 
             var _session: VTDecompressionSession?
@@ -141,9 +193,12 @@ class VideoDecoder {
 
             if sessionStatus == noErr, let session = _session {
                 self.decompressionSession = session
+                configuredSPS = sps
+                configuredPPS = pps
                 VTSessionSetProperty(session, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
                 LogManager.shared.log("VideoDecoder: Session Ready")
             } else {
+                callbackContext = nil
                 LogManager.shared.log("VideoDecoder: Failed to create session \(sessionStatus)")
             }
         }
@@ -223,9 +278,53 @@ class VideoDecoder {
              
              if status != noErr {
                  LogManager.shared.log("VideoDecoder: Decode Fail \(status)")
-                 delegate?.didFailToDecodeFrame(status: status)
+                 reportDecodeFailure(status: status)
              }
          }
+    }
+
+    fileprivate func handleDecodedOutput(
+        imageBuffer: CVImageBuffer,
+        presentationTimeStamp: CMTime,
+        presentationDuration: CMTime,
+        generation callbackGeneration: UInt64
+    ) {
+        decoderQueue.async { [weak self] in
+            guard let self, self.generation == callbackGeneration else { return }
+
+            var sampleBuffer: CMSampleBuffer?
+            var timing = CMSampleTimingInfo(
+                duration: presentationDuration,
+                presentationTimeStamp: presentationTimeStamp,
+                decodeTimeStamp: .invalid
+            )
+            var formatDesc: CMVideoFormatDescription?
+            CMVideoFormatDescriptionCreateForImageBuffer(
+                allocator: kCFAllocatorDefault,
+                imageBuffer: imageBuffer,
+                formatDescriptionOut: &formatDesc
+            )
+            guard let desc = formatDesc else { return }
+
+            CMSampleBufferCreateReadyWithImageBuffer(
+                allocator: kCFAllocatorDefault,
+                imageBuffer: imageBuffer,
+                formatDescription: desc,
+                sampleTiming: &timing,
+                sampleBufferOut: &sampleBuffer
+            )
+
+            guard let sampleBuffer else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.delegate?.didDecode(sampleBuffer: sampleBuffer)
+            }
+        }
+    }
+
+    fileprivate func reportDecodeFailure(status: OSStatus) {
+        DispatchQueue.main.async { [weak self] in
+            self?.delegate?.didFailToDecodeFrame(status: status)
+        }
     }
 }
 
@@ -239,34 +338,20 @@ private func decompressionCallback(
     presentationDuration: CMTime
 ) {
     guard let refCon = decompressionOutputRefCon else { return }
-    let decoder = Unmanaged<VideoDecoder>.fromOpaque(refCon).takeUnretainedValue()
+    let context = Unmanaged<VideoDecoderCallbackContext>.fromOpaque(refCon).takeUnretainedValue()
+    guard let decoder = context.decoder else { return }
     guard status == noErr, let imageBuffer = imageBuffer else {
         if status != noErr {
-            decoder.delegate?.didFailToDecodeFrame(status: status)
+            decoder.reportDecodeFailure(status: status)
         }
         return
     }
-    
-    var sampleBuffer: CMSampleBuffer?
-    var timing = CMSampleTimingInfo(duration: presentationDuration, presentationTimeStamp: presentationTimeStamp, decodeTimeStamp: .invalid)
-    
-    var formatDesc: CMVideoFormatDescription?
-    CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: imageBuffer, formatDescriptionOut: &formatDesc)
-    
-    guard let desc = formatDesc else { return }
-    
-    CMSampleBufferCreateReadyWithImageBuffer(
-        allocator: kCFAllocatorDefault,
+
+    decoder.handleDecodedOutput(
         imageBuffer: imageBuffer,
-        formatDescription: desc,
-        sampleTiming: &timing,
-        sampleBufferOut: &sampleBuffer
+        presentationTimeStamp: presentationTimeStamp,
+        presentationDuration: presentationDuration,
+        generation: context.generation
     )
-    
-    if let sb = sampleBuffer {
-        DispatchQueue.main.async {
-            decoder.delegate?.didDecode(sampleBuffer: sb)
-        }
-    }
 }
 #endif

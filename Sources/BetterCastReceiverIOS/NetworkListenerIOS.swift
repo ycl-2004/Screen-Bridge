@@ -8,6 +8,7 @@ import BetterCastShared
 /// Single source of truth for the receiver's connection state.
 /// The status text is derived alongside it for display.
 enum ReceiverState {
+    case pairingRequired // no secret; listener intentionally stopped
     case waiting        // listening, no sender connected
     case connecting     // sender connected, pairing/authenticating
     case connected      // streaming session active
@@ -22,12 +23,17 @@ protocol NetworkListenerDelegate: AnyObject {
 
 class NetworkListenerIOS {
     weak var delegate: NetworkListenerDelegate?
-    
+
     private var tcpListener: NWListener?       // Wi-Fi — reachable by all devices
     private var tcpP2PListener: NWListener?    // AWDL — low-latency for Apple devices
     private var udpListener: NWListener?
-    
-    private var connectedClients: [NWConnection] = []
+
+    /// One logical receiver session owns one media/control connection and may
+    /// attach one auxiliary audio connection. Auxiliary transport state must
+    /// never drive the global receiver UI.
+    private var mainConnection: NWConnection?
+    private var audioConnection: NWConnection?
+    private var activeSessionID: UUID?
     private var connectionSessionKeys: [ObjectIdentifier: Data] = [:]
     private let pairingSecretStore: PairingSecretStoring = KeychainPairingSecretStore()
     
@@ -51,22 +57,29 @@ class NetworkListenerIOS {
     private var heartbeatTimer: Timer?
     private var inputSequence: UInt64 = 0
 
-    // Stream-health watchdog: a connected sender streams frames continuously,
-    // so prolonged silence means the connection died without a clean close
-    // (Mac force quit, power loss, network drop).
+    // Transport, decoder, and renderer health are deliberately independent.
+    // A static desktop may produce no new video frame, so an explicit media
+    // heartbeat proves that the sender pipeline is alive without pretending a
+    // byte was successfully decoded or rendered.
     private var lastDataReceived = Date()
-
-    /// Liveness of the *video* stream specifically.
-    ///
-    /// The watchdog used to look only at `lastDataReceived`, which any body
-    /// updates — including audio frames arriving on the second connection. So a
-    /// frozen picture with healthy audio never tripped it: the iPad sat on a
-    /// stale frame still reporting "Connected".
-    private var lastVideoReceived = Date()
+    private var sessionStartedAt = Date()
+    private var lastMediaHeartbeat = Date()
+    private var lastVideoAccessUnitReceived = Date.distantPast
+    private var lastVideoDecoded = Date.distantPast
+    private var lastVideoRendered = Date.distantPast
+    private var hasDecodedFrame = false
+    private var hasRenderedFrame = false
+    /// Deduplicates the "not authenticated yet" log emitted by the 0.5s heartbeat.
+    private var hasLoggedUnauthenticatedSend = false
     private let streamSilenceTimeout: TimeInterval = 8.0
     private var pendingLossNotification = false
 
     private var isStarted = false
+    private var privateListenerRetryAttempt = 0
+    private var privateListenerRestartWork: DispatchWorkItem?
+
+    private let capabilitiesLock = NSLock()
+    private var receiverCapabilities: ReceiverCapabilities?
 
     init() {}
 
@@ -78,16 +91,96 @@ class NetworkListenerIOS {
     }
 
     func start() {
-        // Idempotent: saving the pairing code repeatedly must not stack
-        // listeners (duplicate Bonjour records confuse the sender's first
-        // dial) or heartbeat timers.
-        guard !isStarted else {
-            LogManager.shared.log("ReceiverIOS: start() ignored — already running")
-            return
+        networkQueue.async { [weak self] in
+            guard let self else { return }
+            // Idempotent: saving the pairing code repeatedly must not stack
+            // listeners (duplicate Bonjour records confuse the sender's first
+            // dial) or heartbeat timers.
+            guard !self.isStarted else {
+                LogManager.shared.log("ReceiverIOS: start() ignored — already running")
+                return
+            }
+            self.isStarted = true
+            self.startPrivateP2P()
+            self.startHeartbeat()
         }
-        isStarted = true
-        startPrivateP2P()
-        startHeartbeat()
+    }
+
+    func updateReceiverCapabilities(pixelWidth: Int, pixelHeight: Int) {
+        let capabilities = ReceiverCapabilities(pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+        capabilitiesLock.lock()
+        receiverCapabilities = capabilities.isValid ? capabilities : nil
+        capabilitiesLock.unlock()
+    }
+
+    private func currentReceiverCapabilities() -> ReceiverCapabilities? {
+        capabilitiesLock.lock()
+        defer { capabilitiesLock.unlock() }
+        return receiverCapabilities
+    }
+
+    /// Revoke the complete logical session and stop accepting new connections.
+    /// The listener starts again only after the user stores a new pairing code.
+    func resetPairingSession(completion: (() -> Void)? = nil) {
+        networkQueue.async { [weak self] in
+            guard let self else { return }
+            self.isStarted = false
+            self.privateListenerRestartWork?.cancel()
+            self.privateListenerRestartWork = nil
+            self.privateListenerRetryAttempt = 0
+
+            self.tcpListener?.stateUpdateHandler = nil
+            self.tcpP2PListener?.stateUpdateHandler = nil
+            self.udpListener?.stateUpdateHandler = nil
+            self.tcpListener?.newConnectionHandler = nil
+            self.tcpP2PListener?.newConnectionHandler = nil
+            self.udpListener?.newConnectionHandler = nil
+            self.tcpListener?.cancel()
+            self.tcpP2PListener?.cancel()
+            self.udpListener?.cancel()
+            self.tcpListener = nil
+            self.tcpP2PListener = nil
+            self.udpListener = nil
+
+            var connectionsByID = self.pendingConnections
+            if let main = self.mainConnection {
+                connectionsByID[ObjectIdentifier(main)] = main
+            }
+            if let audio = self.audioConnection {
+                connectionsByID[ObjectIdentifier(audio)] = audio
+            }
+
+            self.pendingConnections.removeAll()
+            self.mainConnection = nil
+            self.audioConnection = nil
+            self.activeSessionID = nil
+            self.connectionSessionKeys.removeAll()
+            self.connectionFormat.removeAll()
+            self.inputSequence = 0
+            self.pendingLossNotification = false
+            self.lastDataReceived = Date()
+            self.sessionStartedAt = Date()
+            self.lastMediaHeartbeat = Date()
+            self.lastVideoAccessUnitReceived = .distantPast
+            self.lastVideoDecoded = .distantPast
+            self.lastVideoRendered = .distantPast
+            self.hasDecodedFrame = false
+            self.hasRenderedFrame = false
+
+            for connection in connectionsByID.values {
+                connection.stateUpdateHandler = nil
+                connection.cancel()
+            }
+
+            self.audioPlayer?.stop()
+            self.videoDecoder?.reset()
+            self.notifyState(.pairingRequired, "Enter pairing code")
+            DispatchQueue.main.async {
+                self.heartbeatTimer?.invalidate()
+                self.heartbeatTimer = nil
+                completion?()
+            }
+        }
     }
 
     private func notifyState(_ state: ReceiverState, _ text: String) {
@@ -99,11 +192,15 @@ class NetworkListenerIOS {
     /// Called by the view controller when the app returns to the foreground so
     /// the watchdog doesn't count suspended time as stream silence.
     func noteForegroundResumed() {
-        lastDataReceived = Date()
-        lastVideoReceived = Date()
+        networkQueue.async { [weak self] in
+            self?.lastDataReceived = Date()
+            self?.lastMediaHeartbeat = Date()
+        }
     }
 
     private func startPrivateP2P() {
+        guard isStarted else { return }
+        guard tcpP2PListener == nil else { return }
         let deviceName = UserDefaults.standard.string(forKey: "customDeviceName")
             ?? UIDevice.current.name
 
@@ -134,7 +231,24 @@ class NetworkListenerIOS {
         } catch {
             LogManager.shared.log("ReceiverIOS (TCP-P2P): Error \(error)")
             notifyState(.waiting, "Waiting for network access...")
+            schedulePrivateListenerRestart(reason: error.localizedDescription)
         }
+    }
+
+    private func schedulePrivateListenerRestart(reason: String) {
+        guard isStarted, privateListenerRestartWork == nil else { return }
+        privateListenerRetryAttempt += 1
+        let delay = min(pow(2.0, Double(privateListenerRetryAttempt - 1)), 8.0)
+        LogManager.shared.log("ReceiverIOS (TCP-P2P): Retry in \(Int(delay))s after \(reason)")
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.privateListenerRestartWork = nil
+            guard self.isStarted, self.tcpP2PListener == nil else { return }
+            self.startPrivateP2P()
+        }
+        privateListenerRestartWork = work
+        networkQueue.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func startTCP() {
@@ -230,6 +344,11 @@ class NetworkListenerIOS {
     private func handleListenerState(_ state: NWListener.State, type: String) {
         switch state {
         case .ready:
+            if type == "TCP-P2P" {
+                privateListenerRetryAttempt = 0
+                privateListenerRestartWork?.cancel()
+                privateListenerRestartWork = nil
+            }
             let listener: NWListener? = {
                 switch type {
                 case "TCP": return self.tcpListener
@@ -244,12 +363,12 @@ class NetworkListenerIOS {
             }
             // Only announce "waiting" while no session is active — the listener
             // also reports ready on restarts during a live session.
-            if connectedClients.isEmpty {
+            if mainConnection == nil {
                 notifyState(.waiting, "Ready. Waiting for Sender...")
             }
         case .failed(let error):
             LogManager.shared.log("ReceiverIOS (\(type)): Failed \(error) — restarting...")
-            if connectedClients.isEmpty {
+            if mainConnection == nil {
                 notifyState(.waiting, "Restarting listener...")
             }
             // Auto-restart the failed listener
@@ -257,23 +376,24 @@ class NetworkListenerIOS {
             case "TCP":
                 self.tcpListener?.cancel()
                 self.tcpListener = nil
-                DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                networkQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard self?.isStarted == true else { return }
                     self?.startTCP()
                 }
             case "TCP-P2P":
                 // Private build starts only this listener — it MUST come back after a
                 // failure (Wi-Fi transition, AWDL teardown), or the iPad stays
                 // undiscoverable until the app is relaunched.
+                self.tcpP2PListener?.stateUpdateHandler = nil
+                self.tcpP2PListener?.newConnectionHandler = nil
                 self.tcpP2PListener?.cancel()
                 self.tcpP2PListener = nil
-                LogManager.shared.log("ReceiverIOS (TCP-P2P): Listener stopped — restarting in 1s...")
-                DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    self?.startPrivateP2P()
-                }
+                schedulePrivateListenerRestart(reason: error.localizedDescription)
             default:
                 self.udpListener?.cancel()
                 self.udpListener = nil
-                DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                networkQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard self?.isStarted == true else { return }
                     self?.startUDP()
                 }
             }
@@ -286,53 +406,55 @@ class NetworkListenerIOS {
     /// there indefinitely, nor to accumulate half-open sessions.
     private static let handshakeTimeout: TimeInterval = 10
     private static let maxPendingHandshakes = 4
-    private var pendingHandshakes = 0
+    private var pendingConnections: [ObjectIdentifier: NWConnection] = [:]
+
+    private struct AuthenticatedReceiverConnection {
+        let role: StreamConnectionRole
+        let sessionID: UUID
+        let sessionKey: Data
+    }
 
     private func handleNewConnection(_ connection: NWConnection, type: String) {
-        if pendingHandshakes >= Self.maxPendingHandshakes {
-            LogManager.shared.log("ReceiverIOS: Refusing \(type) connection — \(pendingHandshakes) handshakes already pending")
+        let connectionID = ObjectIdentifier(connection)
+        if pendingConnections.count >= Self.maxPendingHandshakes {
+            LogManager.shared.log("ReceiverIOS: Refusing \(type) connection — \(pendingConnections.count) handshakes already pending")
             connection.cancel()
             return
+        }
+        // Reserve the slot before the transport becomes ready. Checking first
+        // and incrementing later allowed simultaneous cold connections to all
+        // pass a limit of four.
+        pendingConnections[connectionID] = connection
+
+        networkQueue.asyncAfter(deadline: .now() + Self.handshakeTimeout) { [weak self, weak connection] in
+            guard let self, let connection else { return }
+            guard self.pendingConnections.removeValue(forKey: connectionID) != nil else { return }
+            LogManager.shared.log("ReceiverIOS: Pairing timed out after \(Int(Self.handshakeTimeout))s — closing connection")
+            if self.mainConnection == nil {
+                self.notifyState(.waiting, "Pairing timed out")
+            }
+            connection.cancel()
         }
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
             switch state {
             case .ready:
-                LogManager.shared.log("ReceiverIOS: \(type) Connection ready")
-                self.notifyState(.connecting, "Authenticating...")
-
-                self.pendingHandshakes += 1
-                var settled = false
-                let settle: () -> Bool = {
-                    if settled { return false }
-                    settled = true
-                    self.pendingHandshakes = max(0, self.pendingHandshakes - 1)
-                    return true
-                }
-
-                self.networkQueue.asyncAfter(deadline: .now() + Self.handshakeTimeout) {
-                    guard settle() else { return }
-                    LogManager.shared.log("ReceiverIOS: Pairing timed out after \(Int(Self.handshakeTimeout))s — closing connection")
-                    self.notifyState(.waiting, "Pairing timed out")
+                guard self.pendingConnections[connectionID] != nil else {
                     connection.cancel()
+                    return
                 }
+                LogManager.shared.log("ReceiverIOS: \(type) Connection ready")
 
                 self.performPairingHandshake(on: connection) { [weak self] result in
                     guard let self = self else { return }
-                    guard settle() else { return }
+                    guard self.pendingConnections.removeValue(forKey: connectionID) != nil else { return }
                     switch result {
-                    case .success(let sessionKey):
-                        let connectionId = ObjectIdentifier(connection)
-                        self.connectionSessionKeys[connectionId] = sessionKey
-
-                        if !self.connectedClients.contains(where: { $0 === connection }) {
-                            self.connectedClients.append(connection)
+                    case .success(let authenticated):
+                        guard self.activateAuthenticatedConnection(authenticated, connection: connection) else {
+                            connection.cancel()
+                            return
                         }
-
-                        self.lastDataReceived = Date()
-                        self.lastVideoReceived = Date()
-                        self.notifyState(.connected, "Connected")
 
                         if type == "UDP" {
                             self.receiveUDP(on: connection)
@@ -341,14 +463,18 @@ class NetworkListenerIOS {
                         }
                     case .failure(let error):
                         LogManager.shared.log("ReceiverIOS: Pairing failed: \(error.localizedDescription)")
-                        self.notifyState(.waiting, "Pairing failed — check that both devices use the same code")
+                        if self.mainConnection == nil {
+                            self.notifyState(.waiting, "Pairing failed — check that both devices use the same code")
+                        }
                         connection.cancel()
                     }
                 }
             case .failed(let error):
                 LogManager.shared.log("ReceiverIOS: Connection failed \(error)")
+                self.pendingConnections.removeValue(forKey: connectionID)
                 self.removeConnection(connection)
             case .cancelled:
+                self.pendingConnections.removeValue(forKey: connectionID)
                 self.removeConnection(connection)
             default:
                 break
@@ -356,16 +482,85 @@ class NetworkListenerIOS {
         }
         connection.start(queue: networkQueue)
     }
-    
-    private func removeConnection(_ connection: NWConnection) {
-        let wasConnected = connectedClients.contains { $0 === connection }
-        if let index = connectedClients.firstIndex(where: { $0 === connection }) {
-            connectedClients.remove(at: index)
-        }
-        connectionFormat.removeValue(forKey: ObjectIdentifier(connection))
-        connectionSessionKeys.removeValue(forKey: ObjectIdentifier(connection))
 
-        if wasConnected && connectedClients.isEmpty {
+    private func activateAuthenticatedConnection(
+        _ authenticated: AuthenticatedReceiverConnection,
+        connection: NWConnection
+    ) -> Bool {
+        let connectionID = ObjectIdentifier(connection)
+
+        switch authenticated.role {
+        case .mediaControl:
+            let staleConnections = [mainConnection, audioConnection].compactMap { $0 }
+            mainConnection = nil
+            audioConnection = nil
+            activeSessionID = nil
+            for stale in staleConnections where stale !== connection {
+                clearConnectionMetadata(stale)
+                stale.stateUpdateHandler = nil
+                stale.cancel()
+            }
+
+            mainConnection = connection
+            activeSessionID = authenticated.sessionID
+            connectionSessionKeys[connectionID] = authenticated.sessionKey
+            lastDataReceived = Date()
+            sessionStartedAt = Date()
+            lastMediaHeartbeat = Date()
+            lastVideoAccessUnitReceived = .distantPast
+            lastVideoDecoded = .distantPast
+            lastVideoRendered = .distantPast
+            hasDecodedFrame = false
+            hasRenderedFrame = false
+            inputSequence = 0
+            lastKeyframeRequest = .distantPast
+            pendingLossNotification = false
+            notifyState(.connected, "Connected")
+            LogManager.shared.log("ReceiverIOS: Media session \(authenticated.sessionID) authenticated")
+            return true
+
+        case .audio:
+            guard ReceiverSessionPolicy.mayAttach(
+                role: authenticated.role,
+                sessionID: authenticated.sessionID,
+                activeSessionID: activeSessionID,
+                hasMainTransport: mainConnection != nil
+            ) else {
+                LogManager.shared.log("ReceiverIOS: Refusing audio transport for inactive session \(authenticated.sessionID)")
+                return false
+            }
+            if let previousAudio = audioConnection, previousAudio !== connection {
+                clearConnectionMetadata(previousAudio)
+                previousAudio.stateUpdateHandler = nil
+                previousAudio.cancel()
+            }
+            audioConnection = connection
+            connectionSessionKeys[connectionID] = authenticated.sessionKey
+            LogManager.shared.log("ReceiverIOS: Audio transport joined session \(authenticated.sessionID)")
+            return true
+        }
+    }
+
+    private func clearConnectionMetadata(_ connection: NWConnection) {
+        let connectionID = ObjectIdentifier(connection)
+        connectionFormat.removeValue(forKey: connectionID)
+        connectionSessionKeys.removeValue(forKey: connectionID)
+    }
+
+    private func removeConnection(_ connection: NWConnection) {
+        pendingConnections.removeValue(forKey: ObjectIdentifier(connection))
+        clearConnectionMetadata(connection)
+
+        if mainConnection === connection {
+            let attachedAudio = audioConnection
+            mainConnection = nil
+            audioConnection = nil
+            activeSessionID = nil
+            if let attachedAudio {
+                clearConnectionMetadata(attachedAudio)
+                attachedAudio.stateUpdateHandler = nil
+                attachedAudio.cancel()
+            }
             audioPlayer?.stop()
             // Start the next session from a clean decoder. Reusing the previous
             // session's SPS/PPS and decompression session showed artifacts until
@@ -377,6 +572,13 @@ class NetworkListenerIOS {
             } else {
                 notifyState(.disconnected, "Device disconnected")
             }
+        } else if audioConnection === connection {
+            audioConnection = nil
+            audioPlayer?.stop()
+            // The media/control transport remains authoritative. Protocol v2
+            // never falls back to audio on it, so do not publish a disconnect;
+            // the sender will reattach a fresh auxiliary connection.
+            LogManager.shared.log("ReceiverIOS: Auxiliary audio transport disconnected; media session remains active")
         }
     }
 
@@ -468,7 +670,10 @@ class NetworkListenerIOS {
         }
     }
 
-    private func performPairingHandshake(on connection: NWConnection, completion: @escaping (Result<Data, Error>) -> Void) {
+    private func performPairingHandshake(
+        on connection: NWConnection,
+        completion: @escaping (Result<AuthenticatedReceiverConnection, Error>) -> Void
+    ) {
         guard let secret = loadPairingSecret() else {
             completion(.failure(PairingAuthError.invalidProof))
             return
@@ -483,6 +688,24 @@ class NetworkListenerIOS {
                     return
                 }
 
+                let receiverSessionID: UUID
+                switch hello.role {
+                case .mediaControl:
+                    guard hello.sessionID == nil else {
+                        completion(.failure(PairingAuthError.invalidEnvelope))
+                        return
+                    }
+                    receiverSessionID = UUID()
+                case .audio:
+                    guard let requestedSessionID = hello.sessionID,
+                          requestedSessionID == self.activeSessionID,
+                          self.mainConnection != nil else {
+                        completion(.failure(PairingAuthError.invalidProof))
+                        return
+                    }
+                    receiverSessionID = requestedSessionID
+                }
+
                 let receiverNonce = PairingAuthenticator.randomNonce()
                 let receiverHello = ReceiverHello(
                     receiverNonce: receiverNonce,
@@ -490,7 +713,9 @@ class NetworkListenerIOS {
                         secret: secret,
                         senderNonce: hello.senderNonce,
                         receiverNonce: receiverNonce
-                    )
+                    ),
+                    sessionID: receiverSessionID,
+                    capabilities: self.currentReceiverCapabilities()
                 )
 
                 self.sendCodable(receiverHello, on: connection) { [weak self] sendResult in
@@ -513,10 +738,14 @@ class NetworkListenerIOS {
                                 return
                             }
 
-                            completion(.success(PairingAuthenticator.deriveSessionKey(
-                                secret: secret,
-                                senderNonce: hello.senderNonce,
-                                receiverNonce: receiverNonce
+                            completion(.success(AuthenticatedReceiverConnection(
+                                role: hello.role,
+                                sessionID: receiverSessionID,
+                                sessionKey: PairingAuthenticator.deriveSessionKey(
+                                    secret: secret,
+                                    senderNonce: hello.senderNonce,
+                                    receiverNonce: receiverNonce
+                                )
                             )))
                         case .failure(let error):
                             completion(.failure(error))
@@ -533,6 +762,12 @@ class NetworkListenerIOS {
     private var connectionFormat: [ObjectIdentifier: Bool] = [:]
 
     private func receiveTCP(on connection: NWConnection) {
+        // A replaced session can still have one receive callback already queued.
+        // Never let that callback keep reading into the newly active session.
+        guard mainConnection === connection || audioConnection === connection else {
+            connection.cancel()
+            return
+        }
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] content, contentContext, isComplete, error in
             if let error = error {
                 LogManager.shared.log("ReceiverIOS (TCP): Error \(error)")
@@ -586,13 +821,22 @@ class NetworkListenerIOS {
     }
 
     private func handleReceivedBody(_ body: Data, connection: NWConnection) {
+        // Activation of a new media session revokes both transports from the
+        // previous one. Ignore any body whose completion raced with that swap.
+        guard mainConnection === connection || audioConnection === connection else { return }
         lastDataReceived = Date()
         let connId = ObjectIdentifier(connection)
         let firstByte = body[body.startIndex]
 
+        if audioConnection === connection && firstByte != 0x02 {
+            LogManager.shared.log("ReceiverIOS: Closing auxiliary transport that sent non-audio data")
+            connection.cancel()
+            return
+        }
+
         // Auto-detect framing on first frame
         if connectionFormat[connId] == nil {
-            if firstByte == 0x01 || firstByte == 0x02 || firstByte == 0x03 {
+            if firstByte == 0x01 || firstByte == 0x02 || firstByte == 0x03 || firstByte == 0x04 {
                 connectionFormat[connId] = true
                 LogManager.shared.log("ReceiverIOS: Detected type-byte framing (desktop sender)")
             } else {
@@ -605,17 +849,21 @@ class NetworkListenerIOS {
             // Type-byte framing: [0x01=video | 0x02=audio][payload]
             let payload = body.dropFirst(1)
             if firstByte == 0x01 {
-                lastVideoReceived = Date()
+                lastMediaHeartbeat = Date()
+                lastVideoAccessUnitReceived = Date()
                 videoDecoder?.decode(data: payload)
             } else if firstByte == 0x02 {
                 audioPlayer?.decode(aacData: payload)
             } else if firstByte == 0x03 {
                 LogManager.shared.log("ReceiverIOS: Sender stopped sharing")
                 removeConnection(connection)
+            } else if firstByte == 0x04 {
+                lastMediaHeartbeat = Date()
             }
         } else {
             // Legacy framing: raw video data (with 8-byte PTS prefix handled by decoder)
-            lastVideoReceived = Date()
+            lastMediaHeartbeat = Date()
+            lastVideoAccessUnitReceived = Date()
             videoDecoder?.decode(data: body)
         }
     }
@@ -704,8 +952,8 @@ class NetworkListenerIOS {
 
     private func sendHeartbeat() {
         // Don't log each beat (2 lines/sec drowns the log) and don't bother
-        // building envelopes when no sender is connected.
-        guard !connectedClients.isEmpty else { return }
+        // building envelopes when no sender is connected; sendInputEvent checks
+        // that on the network queue that owns the connection.
         // While backgrounded, stay silent on purpose: the sender is holding the
         // session in its background grace period, and any authenticated message
         // (including a heartbeat) would end that grace early. Heartbeats resume
@@ -723,10 +971,6 @@ class NetworkListenerIOS {
     /// after the 15s heartbeat timeout. Sent inside a short background task from
     /// ViewController so it flushes before iPadOS suspends the app.
     func sendBackgroundHold(completion: (() -> Void)? = nil) {
-        guard !connectedClients.isEmpty else {
-            completion?()
-            return
-        }
         LogManager.shared.log("ReceiverIOS: Sending background hold notice (keyCode 555)")
         sendInputEvent(InputEvent(type: .command, keyCode: 555))
         // sendInputEvent hops to networkQueue; signal completion after the send
@@ -738,76 +982,113 @@ class NetworkListenerIOS {
         }
     }
 
-    /// Watchdog: a live sender streams frames continuously, so prolonged
-    /// silence while we are in the foreground means the connection died
-    /// without a clean close. Surface "connection lost" and drop the dead
-    /// connections instead of freezing on the last frame forever.
+    /// Evaluate transport, decode, and renderer health independently. A static
+    /// screen is healthy when the explicit media heartbeat continues even if
+    /// ScreenCaptureKit has no changed frame to send.
     private func checkStreamHealth() {
-        guard !connectedClients.isEmpty else { return }
+        let appIsActive = UIApplication.shared.applicationState == .active
+        networkQueue.async { [weak self] in
+            self?.evaluateStreamHealth(appIsActive: appIsActive)
+        }
+    }
+
+    private func evaluateStreamHealth(appIsActive: Bool) {
+        guard mainConnection != nil else { return }
         // Backgrounded: the sender pauses the stream during its grace period,
         // so silence is expected. The clock is reset on foreground return.
-        guard UIApplication.shared.applicationState == .active else { return }
-        // Judge on video liveness, not on "any bytes arrived". Audio keeps
-        // flowing on its own connection while the picture is frozen.
-        guard Date().timeIntervalSince(lastVideoReceived) > streamSilenceTimeout else { return }
+        guard appIsActive else { return }
 
-        LogManager.shared.log("ReceiverIOS: No video for \(Int(streamSilenceTimeout))s — declaring connection lost")
+        let now = Date()
+        let snapshot = MediaLivenessSnapshot(
+            sessionStartedAt: sessionStartedAt,
+            lastMediaHeartbeat: lastMediaHeartbeat,
+            lastVideoAccessUnitReceived: lastVideoAccessUnitReceived,
+            lastVideoDecoded: lastVideoDecoded,
+            lastVideoRendered: lastVideoRendered,
+            hasDecodedFrame: hasDecodedFrame,
+            hasRenderedFrame: hasRenderedFrame
+        )
+        guard let failure = MediaLivenessEvaluator.failure(
+            for: snapshot,
+            now: now,
+            timeout: streamSilenceTimeout
+        ) else { return }
+        LogManager.shared.log("ReceiverIOS: Stream unhealthy (\(failure.rawValue)) — declaring connection lost")
         pendingLossNotification = true
-        let stale = connectedClients
-        networkQueue.async {
-            for connection in stale {
-                connection.cancel()
-            }
+        let stale = [mainConnection, audioConnection].compactMap { $0 }
+        for connection in stale {
+            connection.cancel()
         }
         // Reset so we don't re-trigger every tick while cancels propagate.
-        lastDataReceived = Date()
-        lastVideoReceived = Date()
+        lastDataReceived = now
+        lastMediaHeartbeat = now
     }
 
     /// Request a keyframe (command 999) from the sender, throttled to one request
     /// per 2 seconds. Used for decode-error recovery on the TCP path.
     func requestKeyframeThrottled(reason: String) {
-        guard Date().timeIntervalSince(lastKeyframeRequest) > 2.0 else { return }
-        lastKeyframeRequest = Date()
-        LogManager.shared.log("ReceiverIOS: Requesting keyframe (\(reason))")
-        sendInputEvent(InputEvent(type: .command, keyCode: 999))
+        networkQueue.async { [weak self] in
+            guard let self else { return }
+            guard Date().timeIntervalSince(self.lastKeyframeRequest) > 2.0 else { return }
+            self.lastKeyframeRequest = Date()
+            LogManager.shared.log("ReceiverIOS: Requesting keyframe (\(reason))")
+            self.sendInputEventOnNetworkQueue(InputEvent(type: .command, keyCode: 999))
+        }
     }
     
     func sendInputEvent(_ event: InputEvent) {
-        guard let payload = try? JSONEncoder().encode(event) else { return }
-
         networkQueue.async { [weak self] in
-            guard let self = self else { return }
-            for connection in self.connectedClients {
-                guard let sessionKey = self.connectionSessionKeys[ObjectIdentifier(connection)] else {
-                    LogManager.shared.log("ReceiverIOS: Refusing to send input before pairing auth")
-                    continue
-                }
-
-                self.inputSequence &+= 1
-                let envelope = AuthenticatedEnvelope.seal(
-                    sequence: self.inputSequence,
-                    payload: payload,
-                    sessionKey: sessionKey
-                )
-                guard let data = try? JSONEncoder().encode(envelope) else { continue }
-
-                var packet = Data()
-                var length32 = UInt32(data.count).bigEndian
-                packet.append(Data(bytes: &length32, count: 4))
-                packet.append(data)
-
-                connection.send(content: packet, completion: .contentProcessed { _ in })
-            }
+            self?.sendInputEventOnNetworkQueue(event)
         }
+    }
+
+    private func sendInputEventOnNetworkQueue(_ event: InputEvent) {
+        guard let payload = try? JSONEncoder().encode(event) else { return }
+        guard let connection = mainConnection,
+              let sessionKey = connectionSessionKeys[ObjectIdentifier(connection)] else {
+            // The heartbeat keeps firing while unpaired, so logging every
+            // refusal buried the rest of the log under two lines per second.
+            // Report the transition once and stay quiet until it changes.
+            if !hasLoggedUnauthenticatedSend {
+                hasLoggedUnauthenticatedSend = true
+                LogManager.shared.log("ReceiverIOS: Refusing to send input before media session auth")
+            }
+            return
+        }
+        hasLoggedUnauthenticatedSend = false
+
+        inputSequence &+= 1
+        let envelope = AuthenticatedEnvelope.seal(
+            sequence: inputSequence,
+            payload: payload,
+            sessionKey: sessionKey
+        )
+        guard let data = try? JSONEncoder().encode(envelope) else { return }
+
+        var packet = Data()
+        var length32 = UInt32(data.count).bigEndian
+        packet.append(Data(bytes: &length32, count: 4))
+        packet.append(data)
+
+        connection.send(content: packet, completion: .contentProcessed { _ in })
     }
 }
 
 // Conformance to VideoDecoderDelegate
 extension NetworkListenerIOS: VideoDecoderDelegate {
     func didDecode(sampleBuffer: CMSampleBuffer) {
-        DispatchQueue.main.async {
-            self.videoRenderer?.enqueue(sampleBuffer)
+        networkQueue.async { [weak self] in
+            self?.hasDecodedFrame = true
+            self?.lastVideoDecoded = Date()
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.videoRenderer?.enqueue(sampleBuffer) == true {
+                self.networkQueue.async { [weak self] in
+                    self?.hasRenderedFrame = true
+                    self?.lastVideoRendered = Date()
+                }
+            }
         }
     }
 

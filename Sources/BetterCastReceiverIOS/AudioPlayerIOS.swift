@@ -19,7 +19,10 @@ class AudioPlayerIOS {
     private var playerStarted = false
     private var decodeCount = 0
     private var droppedCount = 0
+    private var isInterrupted = false
     private let queue = DispatchQueue(label: "com.bettercast.audio-player", qos: .userInteractive)
+    private let queueKey = DispatchSpecificKey<Void>()
+    private var notificationObservers: [NSObjectProtocol] = []
 
     // Jitter buffer management
     // At 48kHz with 1024-frame AAC packets, each buffer is ~21ms.
@@ -35,10 +38,15 @@ class AudioPlayerIOS {
     fileprivate var packetDesc = AudioStreamPacketDescription()
 
     init() {
+        queue.setSpecific(key: queueKey, value: ())
         setupEngine()
+        observeAudioSession()
     }
 
     deinit {
+        for observer in notificationObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
         stop()
         if let converter = audioConverter {
             AudioConverterDispose(converter)
@@ -69,6 +77,81 @@ class AudioPlayerIOS {
 
         self.audioEngine = engine
         self.playerNode = player
+    }
+
+    private func observeAudioSession() {
+        let center = NotificationCenter.default
+        notificationObservers.append(
+            center.addObserver(
+                forName: AVAudioSession.interruptionNotification,
+                object: AVAudioSession.sharedInstance(),
+                queue: nil
+            ) { [weak self] notification in
+                self?.handleInterruption(notification)
+            }
+        )
+        notificationObservers.append(
+            center.addObserver(
+                forName: AVAudioSession.routeChangeNotification,
+                object: AVAudioSession.sharedInstance(),
+                queue: nil
+            ) { [weak self] notification in
+                self?.handleRouteChange(notification)
+            }
+        )
+    }
+
+    private func handleInterruption(_ notification: Notification) {
+        guard let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
+            return
+        }
+
+        queue.async { [weak self] in
+            guard let self else { return }
+            switch type {
+            case .began:
+                self.isInterrupted = true
+                self.resetPlaybackQueue()
+                LogManager.shared.log("AudioPlayer: Playback interrupted")
+            case .ended:
+                self.isInterrupted = false
+                self.restartEngine(reason: "interruption ended")
+            @unknown default:
+                break
+            }
+        }
+    }
+
+    private func handleRouteChange(_ notification: Notification) {
+        let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+        let reason = rawReason.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+
+        queue.async { [weak self] in
+            guard let self, !self.isInterrupted else { return }
+            self.restartEngine(reason: "route changed (\(reason?.rawValue ?? 0))")
+        }
+    }
+
+    private func resetPlaybackQueue() {
+        playerNode?.stop()
+        audioEngine?.stop()
+        engineStarted = false
+        playerStarted = false
+        pendingBuffers = 0
+        currentPacketData = nil
+        currentPacketConsumed = false
+    }
+
+    private func restartEngine(reason: String) {
+        resetPlaybackQueue()
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+            startEngineIfNeeded()
+            LogManager.shared.log("AudioPlayer: Recovered after \(reason)")
+        } catch {
+            LogManager.shared.log("AudioPlayer: Could not reactivate after \(reason): \(error)")
+        }
     }
 
     private func setupConverter() {
@@ -139,7 +222,7 @@ class AudioPlayerIOS {
 
     private func decodeOnQueue(aacData: Data) {
         // Skip tiny silence frames (< 10 bytes)
-        guard aacData.count >= 10 else { return }
+        guard aacData.count >= 10, !isInterrupted else { return }
 
         setupConverter()
         startEngineIfNeeded()
@@ -202,14 +285,12 @@ class AudioPlayerIOS {
     }
 
     func stop() {
-        queue.sync {
-            playerNode?.stop()
-            audioEngine?.stop()
-            engineStarted = false
-            playerStarted = false
-            pendingBuffers = 0
-            currentPacketData = nil
-            currentPacketConsumed = false
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            resetPlaybackQueue()
+        } else {
+            queue.sync {
+                resetPlaybackQueue()
+            }
         }
     }
 }

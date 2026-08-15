@@ -80,7 +80,7 @@ struct BetterCastSenderApp: App {
                 }
             }
         }
-        .onChange(of: hasCompletedTour) { completed in
+        .onChange(of: hasCompletedTour) { _, completed in
             if !completed {
                 sidebarSelection = .devices
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -120,10 +120,10 @@ extension View {
                     .onAppear {
                         TourAnchorStore.shared.globalFrames[key] = geo.frame(in: .global)
                     }
-                    .onChange(of: geo.frame(in: .global).origin.x) { _ in
+                    .onChange(of: geo.frame(in: .global).origin.x) { _, _ in
                         TourAnchorStore.shared.globalFrames[key] = geo.frame(in: .global)
                     }
-                    .onChange(of: geo.frame(in: .global).origin.y) { _ in
+                    .onChange(of: geo.frame(in: .global).origin.y) { _, _ in
                         TourAnchorStore.shared.globalFrames[key] = geo.frame(in: .global)
                     }
             }
@@ -230,7 +230,7 @@ struct GuidedTourOverlay: View {
             }
         }
         .animation(.easeInOut(duration: 0.35), value: currentStep)
-        .onChange(of: currentStep) { _ in
+        .onChange(of: currentStep) { _, _ in
             if let target = steps[currentStep].sidebarTarget {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     selection = target
@@ -1362,6 +1362,10 @@ struct DetailPanelView: View {
                             client.openPrivacySettings()
                         }
 
+                        Button("Local Network Settings…") {
+                            client.openLocalNetworkSettings()
+                        }
+
                         Button("Reset Permissions…") {
                             pendingDestructiveAction = .resetPermissions
                         }
@@ -1379,6 +1383,23 @@ struct DetailPanelView: View {
                         Button("Replay Tour") {
                             hasCompletedTour = false
                             selection = .devices
+                        }
+                    }
+
+                    if client.localNetworkNeedsAttention {
+                        HStack {
+                            Label(
+                                "Device discovery is blocked. Allow YC Cast in Privacy & Security > Local Network.",
+                                systemImage: "network.slash"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+
+                            Spacer()
+
+                            Button("Retry Discovery") {
+                                client.startBrowsing()
+                            }
                         }
                     }
                 }
@@ -1857,7 +1878,7 @@ struct DisplayOverviewView: View {
         .navigationTitle("Devices")
         .onAppear { thumbProvider.start(displays: displays) }
         .onDisappear { thumbProvider.stop() }
-        .onChange(of: client.connectedDisplays.count) { _ in
+        .onChange(of: client.connectedDisplays.count) { _, _ in
             thumbProvider.start(displays: displays)
         }
     }
@@ -2102,6 +2123,13 @@ struct DeviceDetailView: View {
                         set: { client.setAudioEnabled($0, for: display.id) }
                     ))
                     InfoTip(text: "Sends Chrome audio to this receiver and mutes Chrome on this Mac when supported.")
+                }
+
+                if display.audioEnabled {
+                    LabeledContent("Audio Status") {
+                        Label(display.audioState.label, systemImage: display.audioState.symbolName)
+                            .foregroundStyle(display.audioState.tint)
+                    }
                 }
 
             }
@@ -2387,12 +2415,52 @@ struct SettingsRow<Content: View>: View {
 
 // MARK: - Connected Display Info
 
+enum AudioStreamingState: String, Equatable {
+    case off
+    case waitingForChrome
+    case connecting
+    case streaming
+    case retrying
+    case failed
+
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .waitingForChrome: return "Waiting for Chrome"
+        case .connecting: return "Connecting"
+        case .streaming: return "Streaming"
+        case .retrying: return "Reconnecting"
+        case .failed: return "Needs Attention"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .off: return "speaker.slash"
+        case .waitingForChrome: return "hourglass"
+        case .connecting, .retrying: return "arrow.triangle.2.circlepath"
+        case .streaming: return "speaker.wave.2.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .streaming: return .green
+        case .failed: return .red
+        case .waitingForChrome, .connecting, .retrying: return .orange
+        case .off: return .secondary
+        }
+    }
+}
+
 struct ConnectedDisplayInfo: Identifiable {
     let id: UUID
     let name: String
     let resolution: String
     let displayBounds: CGRect
     var audioEnabled: Bool
+    var audioState: AudioStreamingState
     var cgDisplayID: CGDirectDisplayID? = nil
 }
 
@@ -2450,6 +2518,30 @@ enum NetworkInterfacePreference: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+/// The route we explicitly asked Network.framework to establish. NWPath's
+/// `availableInterfaces` is a capability list, not a reliable selected-interface
+/// signal, so link policy must be derived from this intent plus `usesInterfaceType`.
+private enum ConnectionRouteIntent: Equatable {
+    case automatic
+    case peerToPeer
+    case infrastructure
+    case loopback
+    case wired
+}
+
+private struct ConnectionRouteClassification {
+    let isP2P: Bool
+    let isLoopback: Bool
+    let isWiredCable: Bool
+
+    var description: String {
+        if isP2P { return "P2P Direct Link (AWDL)" }
+        if isLoopback { return "Loopback/ADB tunnel" }
+        if isWiredCable { return "Wired/cable link" }
+        return "Router/infrastructure link"
+    }
+}
+
 private struct ReceiverDisplaySize {
     let reportedWidth: Int
     let reportedHeight: Int
@@ -2467,6 +2559,7 @@ struct ConnectionPipeline {
     let connection: NWConnection
     let streamEndpoint: NWEndpoint
     let service: DiscoveredService
+    let receiverSessionID: UUID
     var lastHeartbeat: Date
     var sessionKey: Data
 
@@ -2478,6 +2571,9 @@ struct ConnectionPipeline {
     var videoEncoder: VideoEncoder?
     var audioEncoder: AudioEncoder?
     var processAudioCapture: ProcessAudioTapCapture?
+    /// Invalidates delayed display/capture callbacks from an older pipeline
+    /// incarnation after a resolution or orientation rebuild.
+    var lifecycleGeneration: UInt64 = 0
 
     // Adaptive: P2P (AWDL) connections get full quality; infrastructure gets throttled
     var isP2P: Bool = false
@@ -2485,10 +2581,20 @@ struct ConnectionPipeline {
     var isLoopback: Bool = false
     // USB-C / Thunderbolt / Ethernet-style direct links — higher bandwidth than router Wi-Fi
     var isWiredCable: Bool = false
-    // TCP backpressure: skip frames while a send is still in flight
+    // TCP backpressure: at most one video packet is in Network.framework and
+    // one recovery keyframe is retained. This bound applies to every route,
+    // including P2P, wired, and loopback.
     var sendInProgress: Bool = false
-    // Time-based send pacing for WiFi ADB (prevents kernel buffer bloat)
-    var lastSendTimeNs: UInt64 = 0
+    var pendingKeyframePacket: Data?
+    var mediaHeartbeatInProgress: Bool = false
+    var audioSendInProgress: Bool = false
+    var pendingAudioPacket: Data?
+    var currentAdaptiveBitrate: Int = 0
+    var targetAdaptiveBitrate: Int = 0
+    var sendLatencyEWMA: TimeInterval = 0
+    var sentFramesSinceAdjustment: Int = 0
+    var droppedFramesSinceAdjustment: Int = 0
+    var lastBitrateAdjustment: Date = Date()
     // WiFi ADB vs USB ADB — WiFi has much less bandwidth, needs throttling
     var isWiFiADB: Bool = false
     // ADB/localhost connections always use TCP framing regardless of global protocol setting
@@ -2505,6 +2611,14 @@ struct ConnectionPipeline {
     // timeout with a longer grace deadline. Cleared by any authenticated
     // message from the receiver.
     var backgroundGraceStart: Date? = nil
+    // Settings actually applied to this pipeline. Requested UI values may be
+    // newer until the user presses Apply.
+    var appliedUseVirtualDisplay: Bool = true
+    var appliedResolutionName: String = ""
+    var appliedRetina: Bool = false
+    var appliedQuality: StreamQuality = .high
+    var appliedAudioEnabled: Bool = false
+    var audioState: AudioStreamingState = .off
 }
 
 private enum PairingTransportError: LocalizedError {
@@ -2515,6 +2629,7 @@ private enum PairingTransportError: LocalizedError {
     case decodeFailed
     case unsupportedProtocol
     case invalidProof
+    case invalidSession
     case sendFailed(Error?)
     case handshakeTimedOut
 
@@ -2534,12 +2649,20 @@ private enum PairingTransportError: LocalizedError {
             return "Receiver uses an unsupported private protocol version"
         case .invalidProof:
             return "Pairing proof did not match"
+        case .invalidSession:
+            return "Auxiliary connection did not join the active receiver session"
         case .sendFailed(let error):
             return error?.localizedDescription ?? "Pairing send failed"
         case .handshakeTimedOut:
             return "Receiver did not finish pairing in time"
         }
     }
+}
+
+private struct AuthenticatedPairing {
+    let sessionKey: Data
+    let receiverSessionID: UUID
+    let receiverCapabilities: ReceiverCapabilities?
 }
 
 /// Ensures a completion handler runs exactly once.
@@ -2583,11 +2706,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     private var browser: NWBrowser?
     private var pipelines: [UUID: ConnectionPipeline] = [:]
+    /// Transports that are dialing or authenticating but do not yet own a
+    /// pipeline. Keeping them explicit makes pairing reset a true revocation
+    /// barrier, including late handshake completions.
+    private var pendingConnections: [UUID: NWConnection] = [:]
     private let pairingSecretStore: PairingSecretStoring = KeychainPairingSecretStore()
 
     @Published var status: String = "Idle"
     @Published private(set) var connectionPhase: ConnectionPhase = .disconnected
     @Published private(set) var hasPairingSecret: Bool = false
+    @Published private(set) var localNetworkNeedsAttention: Bool = false
     @Published var foundServices: [DiscoveredService] = []
     @Published var connectedServices: [DiscoveredService] = []
     @Published var hiddenDeviceKeys: Set<String> = []
@@ -2610,7 +2738,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         didSet {
             UserDefaults.standard.set(audioStreamingEnabled, forKey: Self.audioStreamingEnabledKey)
             if oldValue != audioStreamingEnabled && isConnected {
-                updateStreamResolution()
+                for index in connectedDisplays.indices {
+                    connectedDisplays[index].audioEnabled = audioStreamingEnabled
+                }
+                for connectionID in Array(pipelines.keys) {
+                    reconcileAudioPipeline(for: connectionID)
+                }
             }
         }
     }
@@ -2784,7 +2917,34 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
 
-    func startBrowsing() {
+    private var browserGeneration = UUID()
+    private var browserRetryWork: DispatchWorkItem?
+    private var browserRetryAttempt = 0
+    private let maxBrowserRetryAttempts = 5
+
+    func startBrowsing(resetRetryBudget: Bool = true) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.startBrowsing(resetRetryBudget: resetRetryBudget)
+            }
+            return
+        }
+
+        browserRetryWork?.cancel()
+        browserRetryWork = nil
+        if resetRetryBudget {
+            browserRetryAttempt = 0
+        }
+
+        // A new browse generation atomically retires all callbacks from the old
+        // browser. Repeated settings changes or path notifications must never
+        // leave multiple Bonjour browsers publishing competing result sets.
+        browser?.stateUpdateHandler = nil
+        browser?.browseResultsChangedHandler = nil
+        browser?.cancel()
+        let generation = UUID()
+        browserGeneration = generation
+
         let typeVal = BCConstants.tcpServiceType
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.enableKeepalive = true
@@ -2802,8 +2962,17 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         browser.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard self.browserGeneration == generation,
+                      self.browser === browser else { return }
                 switch state {
                 case .ready:
+                    self.browserRetryAttempt = 0
+                    self.localNetworkNeedsAttention = false
+                    // A denied Local Network permission does NOT fail the
+                    // browser. It stays `.ready` and simply never reports a
+                    // result, which is indistinguishable from "no receiver is
+                    // running" unless we watch for the silence ourselves.
+                    self.scheduleDiscoverySilenceCheck(generation: generation)
                     // Only surface "discovering" when idle — browsing continues
                     // in the background while connected.
                     if self.pipelines.isEmpty && self.connectingServiceNames.isEmpty {
@@ -2811,8 +2980,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     }
                 case .failed(let error):
                     if self.pipelines.isEmpty {
-                        self.setPhase(.failed, "Browsing failed: \(error.localizedDescription)")
+                        self.setPhase(.discovering, "Local Network unavailable — retrying discovery...")
                     }
+                    self.scheduleBrowserRetry(after: error, generation: generation)
                 default:
                     break
                 }
@@ -2822,6 +2992,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         browser.browseResultsChangedHandler = { [weak self] results, changes in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                guard self.browserGeneration == generation,
+                      self.browser === browser else { return }
                 // Build list from mDNS browse results
                 var services = results.compactMap { result -> DiscoveredService? in
                     if case .service(let name, _, _, _) = result.endpoint {
@@ -2838,6 +3010,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 }
                 services.removeAll { self.hiddenDeviceKeys.contains(self.deviceKey(for: $0.name)) }
                 self.foundServices = services
+
+                // Any result at all proves discovery is permitted.
+                if !services.isEmpty {
+                    self.localNetworkNeedsAttention = false
+                }
 
                 // Auto-connect to newly discovered services
                 if self.autoConnect {
@@ -2859,10 +3036,54 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         browser.start(queue: .main)
     }
+
+    /// Time a ready browser is allowed to report nothing before we treat the
+    /// silence as a blocked Local Network permission rather than an empty network.
+    private static let discoverySilenceTimeout: TimeInterval = 8.0
+
+    private func scheduleDiscoverySilenceCheck(generation: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.discoverySilenceTimeout) { [weak self] in
+            guard let self, self.browserGeneration == generation else { return }
+            guard self.foundServices.isEmpty,
+                  self.pipelines.isEmpty,
+                  !self.localNetworkNeedsAttention else { return }
+
+            self.localNetworkNeedsAttention = true
+            LogManager.shared.log(
+                "Sender: Bonjour browser has been ready for \(Int(Self.discoverySilenceTimeout))s "
+                    + "without a single result — Local Network permission is most likely denied "
+                    + "(System Settings > Privacy & Security > Local Network)"
+            )
+        }
+    }
+
+    private func scheduleBrowserRetry(after error: NWError, generation: UUID) {
+        guard browserGeneration == generation else { return }
+        browserRetryAttempt += 1
+
+        guard browserRetryAttempt <= maxBrowserRetryAttempts else {
+            localNetworkNeedsAttention = true
+            if pipelines.isEmpty {
+                setPhase(.failed, "Local Network access unavailable — check Privacy & Security")
+            }
+            LogManager.shared.log("Sender: Bonjour browsing stopped after \(maxBrowserRetryAttempts) retries: \(error.localizedDescription)")
+            return
+        }
+
+        let delay = min(pow(2.0, Double(browserRetryAttempt - 1)), 8.0)
+        LogManager.shared.log("Sender: Bonjour browse failed (\(error.localizedDescription)); retry \(browserRetryAttempt)/\(maxBrowserRetryAttempts) in \(Int(delay))s")
+        let retryWork = DispatchWorkItem { [weak self] in
+            guard let self, self.browserGeneration == generation else { return }
+            self.startBrowsing(resetRetryBudget: false)
+        }
+        browserRetryWork = retryWork
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: retryWork)
+    }
     
     // Heartbeat
     private var lastHeartbeatTime: Date = Date()
     private var heartbeatTimer: Timer?
+    private var lastAudioRecoveryCheck: Date = .distantPast
     private var connectionRefusedCount: Int = 0
     
     // Hard-Lock AWDL Logic
@@ -2882,29 +3103,32 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         
         // We can't monitor recursively in init easily, but we can start it.
         interfaceMonitor.pathUpdateHandler = { [weak self] path in
-            for interface in path.availableInterfaces {
-                // Cache AWDL
-                if interface.name.contains("awdl") || interface.name.contains("llw") {
-                    let isNew = (self?.cachedAWDLInterface == nil)
-                    self?.cachedAWDLInterface = interface
-                    
-                    if isNew {
-                         LogManager.shared.log("Network: Found P2P Interface: \(interface.name) (\(interface.type))")
-                         // Restart browsing on this interface so we get the Link-Local Address
-                         // If we don't, we might try to connect to the Router IP via AWDL, which fails.
-                         if self?.interfacePreference == .p2pOnly {
-                             LogManager.shared.log("Network: Restarting Browser to force discovery via \(interface.name)...")
-                             self?.startBrowsing()
-                         }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                for interface in path.availableInterfaces {
+                    // Cache AWDL
+                    if interface.name.contains("awdl") || interface.name.contains("llw") {
+                        let isNew = self.cachedAWDLInterface == nil
+                        self.cachedAWDLInterface = interface
+
+                        if isNew {
+                            LogManager.shared.log("Network: Found P2P Interface: \(interface.name) (\(interface.type))")
+                            // Restart browsing on this interface so we get the Link-Local Address
+                            // If we don't, we might try to connect to the Router IP via AWDL, which fails.
+                            if self.interfacePreference == .p2pOnly {
+                                LogManager.shared.log("Network: Restarting Browser to force discovery via \(interface.name)...")
+                                self.startBrowsing()
+                            }
+                        }
                     }
-                }
-                // Cache Infra WiFi (en0 typically) — only log on first discovery
-                if interface.type == .wifi && !interface.name.contains("awdl") && !interface.name.contains("llw") {
-                     let isNew = self?.cachedInfraInterface == nil
-                     self?.cachedInfraInterface = interface
-                     if isNew {
-                         LogManager.shared.log("Network: Found Infra Interface: \(interface.name) (\(interface.type))")
-                     }
+                    // Cache Infra WiFi (en0 typically) — only log on first discovery
+                    if interface.type == .wifi && !interface.name.contains("awdl") && !interface.name.contains("llw") {
+                        let isNew = self.cachedInfraInterface == nil
+                        self.cachedInfraInterface = interface
+                        if isNew {
+                            LogManager.shared.log("Network: Found Infra Interface: \(interface.name) (\(interface.type))")
+                        }
+                    }
                 }
             }
         }
@@ -2965,6 +3189,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         if !pipelines.isEmpty {
             LogManager.shared.log("Pairing: Revoking \(pipelines.count) active session(s)")
             disconnect()
+        }
+        if !pendingConnections.isEmpty {
+            LogManager.shared.log("Pairing: Cancelling \(pendingConnections.count) pending connection(s)")
+            let pending = pendingConnections.values
+            pendingConnections.removeAll()
+            connectingServiceNames.removeAll()
+            for connection in pending {
+                connection.stateUpdateHandler = nil
+                connection.cancel()
+            }
         }
     }
 
@@ -3065,10 +3299,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private func performPairingHandshake(
         on connection: NWConnection,
         secret: Data,
-        completion: @escaping (Result<Data, Error>) -> Void
+        role: StreamConnectionRole,
+        receiverSessionID: UUID? = nil,
+        completion: @escaping (Result<AuthenticatedPairing, Error>) -> Void
     ) {
         let completionGuard = SingleCompletionGuard()
-        let finish: (Result<Data, Error>) -> Void = { result in
+        let finish: (Result<AuthenticatedPairing, Error>) -> Void = { result in
             guard completionGuard.claim() else { return }
             completion(result)
         }
@@ -3078,7 +3314,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
 
         let senderNonce = PairingAuthenticator.randomNonce()
-        let hello = SenderHello(senderNonce: senderNonce)
+        let hello = SenderHello(
+            senderNonce: senderNonce,
+            role: role,
+            sessionID: receiverSessionID
+        )
 
         sendCodable(hello, on: connection) { [weak self] sendResult in
             if case .failure(let error) = sendResult {
@@ -3089,6 +3329,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             self?.receiveCodable(ReceiverHello.self, on: connection) { receiverResult in
                 switch receiverResult {
                 case .success(let receiverHello):
+                    if role == .audio && receiverHello.sessionID != receiverSessionID {
+                        finish(.failure(PairingTransportError.invalidSession))
+                        return
+                    }
                     guard PairingAuthenticator.verifyReceiverProof(
                         receiverHello.receiverProof,
                         secret: secret,
@@ -3112,7 +3356,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     self?.sendCodable(proof, on: connection) { proofResult in
                         switch proofResult {
                         case .success:
-                            finish(.success(sessionKey))
+                            finish(.success(AuthenticatedPairing(
+                                sessionKey: sessionKey,
+                                receiverSessionID: receiverHello.sessionID,
+                                receiverCapabilities: receiverHello.capabilities?.isValid == true
+                                    ? receiverHello.capabilities
+                                    : nil
+                            )))
                         case .failure(let error):
                             finish(.failure(error))
                         }
@@ -3133,9 +3383,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         isLoopback: Bool,
         isWiredCable: Bool,
         forceTCP: Bool = false,
-        sessionKey: Data
+        authentication: AuthenticatedPairing
     ) {
         removeExistingConnections(matching: service, keeping: connectionId)
+        pendingConnections.removeValue(forKey: connectionId)
 
         // Create pipeline for this connection only after pairing authentication succeeds.
         var pipeline = ConnectionPipeline(
@@ -3143,14 +3394,24 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             connection: connection,
             streamEndpoint: streamEndpoint,
             service: service,
+            receiverSessionID: authentication.receiverSessionID,
             lastHeartbeat: Date(),
-            sessionKey: sessionKey
+            sessionKey: authentication.sessionKey
         )
         pipeline.isP2P = isP2P
         pipeline.isLoopback = isLoopback
         pipeline.isWiredCable = isWiredCable
         pipeline.forceTCP = forceTCP
         pipeline.isWiFiADB = isLoopback && service.name.contains("WiFi")
+        pipeline.appliedUseVirtualDisplay = useVirtualDisplay
+        pipeline.appliedResolutionName = selectedResolution.name
+        pipeline.appliedRetina = isRetina
+        pipeline.appliedQuality = selectedQuality
+        if let capabilities = authentication.receiverCapabilities {
+            pipeline.reportedScreenWidth = capabilities.pixelWidth
+            pipeline.reportedScreenHeight = capabilities.pixelHeight
+            LogManager.shared.log("Sender: Receiver handshake reported screen \(capabilities.pixelWidth)x\(capabilities.pixelHeight) for \(service.name)")
+        }
 
         let nameLower = service.name.lowercased()
         let isLegacyReceiver = nameLower.hasPrefix("bettercast receiver")
@@ -3203,6 +3464,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let serviceKey = deviceKey(for: service.name)
         guard let secret = loadPairingSecret() else {
             connectingServiceNames.remove(serviceKey)
+            pendingConnections.removeValue(forKey: connectionId)
             setPhase(.failed, "Pairing required before connecting")
             LogManager.shared.log("Pairing: Missing pairing code; refusing to stream to \(service.name)")
             connection.cancel()
@@ -3210,13 +3472,22 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
 
         setPhase(.authenticating, "Authenticating \(service.name)...")
-        performPairingHandshake(on: connection, secret: secret) { [weak self] result in
+        performPairingHandshake(
+            on: connection,
+            secret: secret,
+            role: .mediaControl
+        ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.connectingServiceNames.remove(serviceKey)
 
                 switch result {
-                case .success(let sessionKey):
+                case .success(let authentication):
+                    guard self.pendingConnections.removeValue(forKey: connectionId) === connection else {
+                        LogManager.shared.log("Pairing: Ignoring late authentication for revoked connection to \(service.name)")
+                        connection.cancel()
+                        return
+                    }
                     self.activateAuthenticatedConnection(
                         connection,
                         connectionId: connectionId,
@@ -3226,9 +3497,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         isLoopback: isLoopback,
                         isWiredCable: isWiredCable,
                         forceTCP: forceTCP,
-                        sessionKey: sessionKey
+                        authentication: authentication
                     )
                 case .failure(let error):
+                    self.pendingConnections.removeValue(forKey: connectionId)
                     self.setPhase(.failed, "Pairing failed — check that both devices use the same code")
                     LogManager.shared.log("Pairing: Authentication failed for \(service.name): \(error.localizedDescription)")
                     connection.cancel()
@@ -3270,6 +3542,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         guard pipeline.audioConnection == nil else { return }
         guard let secret = loadPairingSecret() else {
             LogManager.shared.log("AudioConnection: Missing pairing secret for \(pipeline.service.name)")
+            stopAudioPipeline(for: connectionId)
+            setAudioState(.failed, for: connectionId)
             return
         }
 
@@ -3278,6 +3552,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             using: makeDedicatedAudioParameters(for: pipeline)
         )
         let serviceName = pipeline.service.name
+        // Store the in-flight transport immediately so repeated setting
+        // reconciliation cannot start duplicate auxiliary handshakes.
+        pipelines[connectionId]?.audioConnection = audioConnection
+        if pipeline.audioState != .retrying {
+            setAudioState(.connecting, for: connectionId)
+        }
 
         audioConnection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
@@ -3285,37 +3565,48 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
                 switch state {
                 case .ready:
-                    self.performPairingHandshake(on: audioConnection, secret: secret) { [weak self] result in
+                    self.performPairingHandshake(
+                        on: audioConnection,
+                        secret: secret,
+                        role: .audio,
+                        receiverSessionID: pipeline.receiverSessionID
+                    ) { [weak self] result in
                         DispatchQueue.main.async {
                             guard let self else { return }
 
                             switch result {
-                            case .success(let sessionKey):
-                                guard self.pipelines[connectionId] != nil else {
+                            case .success(let authentication):
+                                guard self.pipelines[connectionId]?.audioConnection === audioConnection else {
                                     audioConnection.cancel()
                                     return
                                 }
-                                self.pipelines[connectionId]?.audioConnection = audioConnection
-                                self.pipelines[connectionId]?.audioSessionKey = sessionKey
+                                self.pipelines[connectionId]?.audioSessionKey = authentication.sessionKey
+                                self.setAudioState(.streaming, for: connectionId)
                                 LogManager.shared.log("AudioConnection: Dedicated audio TCP ready for \(serviceName)")
                                 self.receiveAuxiliary(on: audioConnection, connectionId: connectionId)
                             case .failure(let error):
-                                audioConnection.cancel()
                                 LogManager.shared.log("AudioConnection: Authentication failed for \(serviceName): \(error.localizedDescription)")
+                                self.handleAudioConnectionEnded(
+                                    audioConnection,
+                                    connectionId: connectionId,
+                                    reason: "authentication failed"
+                                )
                             }
                         }
                     }
                 case .failed(let error):
                     LogManager.shared.log("AudioConnection: Failed for \(serviceName): \(error)")
-                    if self.pipelines[connectionId]?.audioConnection === audioConnection {
-                        self.pipelines[connectionId]?.audioConnection = nil
-                        self.pipelines[connectionId]?.audioSessionKey = nil
-                    }
+                    self.handleAudioConnectionEnded(
+                        audioConnection,
+                        connectionId: connectionId,
+                        reason: "transport failed"
+                    )
                 case .cancelled:
-                    if self.pipelines[connectionId]?.audioConnection === audioConnection {
-                        self.pipelines[connectionId]?.audioConnection = nil
-                        self.pipelines[connectionId]?.audioSessionKey = nil
-                    }
+                    self.handleAudioConnectionEnded(
+                        audioConnection,
+                        connectionId: connectionId,
+                        reason: "transport cancelled"
+                    )
                 default:
                     break
                 }
@@ -3325,18 +3616,57 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         audioConnection.start(queue: .main)
     }
 
-    private func isLikelyWiredCablePath(_ path: NWPath) -> Bool {
-        if path.usesInterfaceType(.wiredEthernet) {
-            return true
-        }
-        if path.usesInterfaceType(.wifi) || path.usesInterfaceType(.loopback) {
-            return false
-        }
+    private func handleAudioConnectionEnded(
+        _ connection: NWConnection,
+        connectionId: UUID,
+        reason: String
+    ) {
+        guard pipelines[connectionId]?.audioConnection === connection else { return }
 
-        return path.availableInterfaces.contains { interface in
-            let name = interface.name.lowercased()
-            return name.hasPrefix("en") || name.contains("bridge") || name.contains("thunderbolt")
+        connection.stateUpdateHandler = nil
+        connection.cancel()
+        pipelines[connectionId]?.audioConnection = nil
+        pipelines[connectionId]?.audioSessionKey = nil
+        pipelines[connectionId]?.audioSendInProgress = false
+        pipelines[connectionId]?.pendingAudioPacket = nil
+
+        if desiredAudioEnabled(for: connectionId) {
+            // A process tap configured as `.muted` must not outlive its output
+            // transport. Tear it down immediately so Chrome becomes audible on
+            // the Mac during retry instead of disappearing on both devices.
+            pipelines[connectionId]?.processAudioCapture?.stop()
+            pipelines[connectionId]?.audioEncoder?.delegate = nil
+            pipelines[connectionId]?.processAudioCapture = nil
+            pipelines[connectionId]?.audioEncoder = nil
+            pipelines[connectionId]?.appliedAudioEnabled = false
+            setAudioState(.retrying, for: connectionId)
+            LogManager.shared.log("AudioConnection: Will retry \(reason) for \(pipelines[connectionId]?.service.name ?? "receiver")")
+        } else {
+            setAudioState(.off, for: connectionId)
         }
+    }
+
+    private func classifyConnectionRoute(
+        path: NWPath?,
+        intent: ConnectionRouteIntent
+    ) -> ConnectionRouteClassification {
+        if intent == .loopback || path?.usesInterfaceType(.loopback) == true {
+            return ConnectionRouteClassification(isP2P: false, isLoopback: true, isWiredCable: false)
+        }
+        if intent == .peerToPeer {
+            return ConnectionRouteClassification(isP2P: true, isLoopback: false, isWiredCable: false)
+        }
+        if intent == .wired || path?.usesInterfaceType(.wiredEthernet) == true {
+            return ConnectionRouteClassification(isP2P: false, isLoopback: false, isWiredCable: true)
+        }
+        return ConnectionRouteClassification(isP2P: false, isLoopback: false, isWiredCable: false)
+    }
+
+    private func logConnectionRoute(_ route: ConnectionRouteClassification, path: NWPath?) {
+        if let path {
+            LogManager.shared.log("Sender: Connected path: \(path)")
+        }
+        LogManager.shared.log("Sender: \(route.description) active")
     }
 
     private func configureParameters(_ parameters: NWParameters) {
@@ -3432,15 +3762,21 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         tcpOptions.connectionTimeout = 10
         let parameters = NWParameters(tls: nil, tcp: tcpOptions)
         parameters.serviceClass = .interactiveVideo
+        var routeIntent: ConnectionRouteIntent = .automatic
 
         // For Apple devices, prefer the P2P endpoint if allowed by the selected mode.
         var connectEndpoint = service.endpoint
         if isAppleReceiver && (interfacePreference == .auto || interfacePreference == .p2pOnly) {
+            if interfacePreference == .p2pOnly {
+                routeIntent = .peerToPeer
+            }
             if let p2pService = foundServices.first(where: { $0.name == service.name + " P2P" }) {
                 // Use the P2P-advertised endpoint for AWDL connection
                 connectEndpoint = p2pService.endpoint
+                routeIntent = .peerToPeer
                 parameters.includePeerToPeer = true
                 if let awdl = cachedAWDLInterface {
+                    routeIntent = .peerToPeer
                     parameters.requiredInterface = awdl
                     LogManager.shared.log("Sender: Apple receiver — using P2P endpoint + AWDL (\(awdl.name)) for \(service.name)")
                 } else {
@@ -3464,6 +3800,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     LogManager.shared.log("Sender: Apple receiver — requiring AWDL (\(awdl.name)) for \(service.name)")
                 } else if let infra = cachedInfraInterface {
                     if interfacePreference == .p2pOnly {
+                        routeIntent = .peerToPeer
                         parameters.prohibitedInterfaces = [infra]
                         parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
                         LogManager.shared.log("Sender: Apple receiver — banning infra, forcing P2P for \(service.name)")
@@ -3477,9 +3814,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             }
         } else if isAppleReceiver {
             configureParameters(parameters)
+            switch interfacePreference {
+            case .p2pOnly: routeIntent = .peerToPeer
+            case .routerOnly: routeIntent = .infrastructure
+            case .wiredCable: routeIntent = .wired
+            case .auto: routeIntent = .automatic
+            }
             LogManager.shared.log("Sender: Apple receiver — using selected mode \(interfacePreference.rawValue) for \(service.name)")
         } else {
             // Non-Apple devices: skip P2P, go straight to infrastructure
+            routeIntent = .infrastructure
             parameters.includePeerToPeer = false
             parameters.serviceClass = .interactiveVideo
             LogManager.shared.log("Sender: Non-Apple receiver — using infrastructure for \(service.name)")
@@ -3487,6 +3831,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         let connection = NWConnection(to: connectEndpoint, using: parameters)
         let connectionId = UUID()
+        pendingConnections[connectionId] = connection
 
         // Timeout: if connection is still not ready after 5s, retry without P2P
         // This handles cases where AWDL negotiation hangs
@@ -3498,6 +3843,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             if self.pipelines[connectionId] == nil && !connectionTimedOut {
                 connectionTimedOut = true
                 self.connectingServiceNames.remove(serviceKey)
+                self.pendingConnections.removeValue(forKey: connectionId)
                 connection.cancel()
 
                 guard canRetryViaInfrastructure else {
@@ -3523,7 +3869,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 tcpOptions.connectionTimeout = 10
                 let fallbackParams = NWParameters(tls: nil, tcp: tcpOptions)
                 fallbackParams.serviceClass = .interactiveVideo
-                self.connectWithParameters(service: service, parameters: fallbackParams, forceTCP: false)
+                self.connectWithParameters(
+                    service: service,
+                    parameters: fallbackParams,
+                    forceTCP: false,
+                    routeIntent: .infrastructure
+                )
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeoutWork)
@@ -3533,51 +3884,26 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 switch state {
                 case .ready:
                     timeoutWork.cancel() // Connection succeeded, cancel timeout
+                    guard let self else { return }
+                    let route = self.classifyConnectionRoute(
+                        path: connection.currentPath,
+                        intent: routeIntent
+                    )
+                    self.logConnectionRoute(route, path: connection.currentPath)
 
-                    var isP2P = false
-                    var isLoopback = false
-                    var isWiredCable = false
-                    if let path = connection.currentPath {
-                        let interfaces = path.availableInterfaces.map { $0.debugDescription }.joined(separator: ", ")
-                        LogManager.shared.log("Sender: Connected via Path: \(path)")
-                        LogManager.shared.log("Sender: Interfaces: \(interfaces)")
-
-                        // `availableInterfaces` lists every interface this path could
-                        // use, ordered with the selected one first. Matching "awdl"
-                        // anywhere in that list meant "this Mac has an AWDL interface"
-                        // was read as "this connection is peer-to-peer" — true on
-                        // essentially every Wi-Fi Mac. Router links were therefore
-                        // given P2P bitrate and P2P backpressure, which is the wrong
-                        // shape for an infrastructure path.
-                        let selectedInterface = path.availableInterfaces.first?.name.lowercased() ?? ""
-                        LogManager.shared.log("Sender: Selected interface: \(selectedInterface.isEmpty ? "unknown" : selectedInterface)")
-
-                        if selectedInterface.contains("awdl") {
-                            isP2P = true
-                            LogManager.shared.log("Sender: P2P Direct Link (AWDL) Active ✅")
-                        } else if selectedInterface.hasPrefix("lo") {
-                            isLoopback = true
-                            LogManager.shared.log("Sender: Loopback/ADB tunnel — high bandwidth mode 🔌")
-                        } else if self?.isLikelyWiredCablePath(path) == true {
-                            isWiredCable = true
-                            LogManager.shared.log("Sender: Wired/iPad USB path active ✅")
-                        } else {
-                            LogManager.shared.log("Sender: Using Router/Infrastructure path ⚠️")
-                        }
-                    }
-
-                    self?.authenticateAndActivateConnection(
+                    self.authenticateAndActivateConnection(
                         connection,
                         connectionId: connectionId,
                         service: service,
                         streamEndpoint: connectEndpoint,
-                        isP2P: isP2P,
-                        isLoopback: isLoopback,
-                        isWiredCable: isWiredCable
+                        isP2P: route.isP2P,
+                        isLoopback: route.isLoopback,
+                        isWiredCable: route.isWiredCable
                     )
                 case .failed(let error):
                     timeoutWork.cancel()
                     self?.connectingServiceNames.remove(serviceKey)
+                    self?.pendingConnections.removeValue(forKey: connectionId)
                     LogManager.shared.log("Sender: Connection to \(service.name) failed: \(error)")
                     // attemptReconnect only takes effect if an authenticated pipeline
                     // existed (removeConnection no-ops otherwise), so failed dial
@@ -3596,6 +3922,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     }
                 case .waiting(let error):
                     self?.setPhase(.connecting, "Waiting for \(service.name)... (\(error.localizedDescription))")
+                case .cancelled:
+                    timeoutWork.cancel()
+                    self?.connectingServiceNames.remove(serviceKey)
+                    self?.pendingConnections.removeValue(forKey: connectionId)
                 default:
                     break
                 }
@@ -3637,7 +3967,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             let parameters = NWParameters(tls: nil, tcp: tcpOptions)
             parameters.serviceClass = .interactiveVideo
             LogManager.shared.log("Sender: Manual connect to \(host):\(portNum) (localhost/ADB mode, no interface restrictions)")
-            connectWithParameters(service: service, parameters: parameters, forceTCP: true)
+            connectWithParameters(service: service, parameters: parameters, forceTCP: true, routeIntent: .loopback)
         } else {
             // Non-localhost manual connect: use plain TCP without interface restrictions
             // This ensures connections to Windows/Linux receivers on the LAN work
@@ -3648,7 +3978,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             let parameters = NWParameters(tls: nil, tcp: tcpOptions)
             parameters.serviceClass = .interactiveVideo
             LogManager.shared.log("Sender: Manual connect to \(host):\(portNum) (LAN mode, no interface restrictions)")
-            connectWithParameters(service: service, parameters: parameters, forceTCP: false)
+            connectWithParameters(service: service, parameters: parameters, forceTCP: false, routeIntent: .infrastructure)
         }
     }
 
@@ -3936,10 +4266,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         parameters.serviceClass = .interactiveVideo
 
         LogManager.shared.log("Sender: ADB connect '\(displayName)' via localhost:51820")
-        connectWithParameters(service: service, parameters: parameters, forceTCP: true)
+        connectWithParameters(service: service, parameters: parameters, forceTCP: true, routeIntent: .loopback)
     }
 
-    private func connectWithParameters(service: DiscoveredService, parameters: NWParameters, forceTCP: Bool = false) {
+    private func connectWithParameters(
+        service: DiscoveredService,
+        parameters: NWParameters,
+        forceTCP: Bool = false,
+        routeIntent: ConnectionRouteIntent = .automatic
+    ) {
         let serviceKey = deviceKey(for: service.name)
         if connectedServices.contains(where: { deviceKey(for: $0.name) == serviceKey }) {
             LogManager.shared.log("Sender: Already connected to \(service.name)")
@@ -3958,56 +4293,33 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         let connection = NWConnection(to: service.endpoint, using: parameters)
         let connectionId = UUID()
+        pendingConnections[connectionId] = connection
 
         connection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
                 switch state {
                 case .ready:
-                    var isP2P = false
-                    var isLoopback = false
-                    var isWiredCable = false
-                    if let path = connection.currentPath {
-                        let interfaces = path.availableInterfaces.map { $0.debugDescription }.joined(separator: ", ")
-                        LogManager.shared.log("Sender: Connected via Path: \(path)")
-                        LogManager.shared.log("Sender: Interfaces: \(interfaces)")
+                    guard let self else { return }
+                    let route = self.classifyConnectionRoute(
+                        path: connection.currentPath,
+                        intent: routeIntent
+                    )
+                    self.logConnectionRoute(route, path: connection.currentPath)
 
-                        // `availableInterfaces` lists every interface this path could
-                        // use, ordered with the selected one first. Matching "awdl"
-                        // anywhere in that list meant "this Mac has an AWDL interface"
-                        // was read as "this connection is peer-to-peer" — true on
-                        // essentially every Wi-Fi Mac. Router links were therefore
-                        // given P2P bitrate and P2P backpressure, which is the wrong
-                        // shape for an infrastructure path.
-                        let selectedInterface = path.availableInterfaces.first?.name.lowercased() ?? ""
-                        LogManager.shared.log("Sender: Selected interface: \(selectedInterface.isEmpty ? "unknown" : selectedInterface)")
-
-                        if selectedInterface.contains("awdl") {
-                            isP2P = true
-                            LogManager.shared.log("Sender: P2P Direct Link (AWDL) Active ✅")
-                        } else if selectedInterface.hasPrefix("lo") {
-                            isLoopback = true
-                            LogManager.shared.log("Sender: Loopback/ADB tunnel — high bandwidth mode 🔌")
-                        } else if self?.isLikelyWiredCablePath(path) == true {
-                            isWiredCable = true
-                            LogManager.shared.log("Sender: Wired/iPad USB path active ✅")
-                        } else {
-                            LogManager.shared.log("Sender: Using Router/Infrastructure path ⚠️")
-                        }
-                    }
-
-                    self?.authenticateAndActivateConnection(
+                    self.authenticateAndActivateConnection(
                         connection,
                         connectionId: connectionId,
                         service: service,
                         streamEndpoint: service.endpoint,
-                        isP2P: isP2P,
-                        isLoopback: isLoopback,
-                        isWiredCable: isWiredCable,
+                        isP2P: route.isP2P,
+                        isLoopback: route.isLoopback,
+                        isWiredCable: route.isWiredCable,
                         forceTCP: forceTCP
                     )
                 case .failed(let error):
                     LogManager.shared.log("Sender: Connection to \(service.name) failed: \(error)")
                     self?.connectingServiceNames.remove(serviceKey)
+                    self?.pendingConnections.removeValue(forKey: connectionId)
                     self?.removeConnection(connectionId, attemptReconnect: true, reason: "transport failed: \(error)")
 
                     let remaining = self?.pipelines.count ?? 0
@@ -4022,6 +4334,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     }
                 case .waiting(let error):
                     self?.setPhase(.connecting, "Waiting for \(service.name)... (\(error.localizedDescription))")
+                case .cancelled:
+                    self?.connectingServiceNames.remove(serviceKey)
+                    self?.pendingConnections.removeValue(forKey: connectionId)
                 default:
                     break
                 }
@@ -4061,6 +4376,22 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // Fallback for older macOS
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    func openLocalNetworkSettings() {
+        let localNetworkURL = URL(
+            string: "x-apple.systempreferences:com.apple.PrivacySecurity.extension?Privacy_LocalNetwork"
+        )
+        let privacyURL = URL(
+            string: "x-apple.systempreferences:com.apple.PrivacySecurity.extension"
+        )
+
+        if let localNetworkURL, NSWorkspace.shared.open(localNetworkURL) {
+            return
+        }
+        if let privacyURL {
+            NSWorkspace.shared.open(privacyURL)
         }
     }
     
@@ -4132,33 +4463,76 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     private func performUpdateStreamResolution() {
-        // Seamlessly update resolution while keeping connections alive.
-        LogManager.shared.log("Sender: Updating Resolution dynamically for all pipelines...")
+        LogManager.shared.log("Sender: Applying display, quality, and audio settings...")
+        let connectionIDs = Array(pipelines.keys)
+        var displayRebuilds: [(id: UUID, generation: UInt64)] = []
 
-        // 1. Stop all pipeline components
-        for (id, pipeline) in pipelines {
-            pipeline.screenRecorder?.stopCapture()
-            pipeline.processAudioCapture?.stop()
-            pipeline.audioConnection?.cancel()
-            pipeline.videoEncoder?.invalidate()
-            pipeline.virtualDisplayManager?.destroyDisplay()
-            InputHandler.shared.removeDisplayBounds(for: id)
-            pipelines[id]?.screenRecorder = nil
-            pipelines[id]?.videoEncoder = nil
-            pipelines[id]?.audioEncoder = nil
-            pipelines[id]?.processAudioCapture = nil
-            pipelines[id]?.audioConnection = nil
-            pipelines[id]?.audioSessionKey = nil
-            pipelines[id]?.virtualDisplayManager = nil
-        }
+        for id in connectionIDs {
+            guard let pipeline = pipelines[id] else { continue }
+            let appliedSettings = PipelineSettingsSnapshot(
+                useVirtualDisplay: pipeline.appliedUseVirtualDisplay,
+                resolutionIdentifier: pipeline.appliedResolutionName,
+                usesRetinaBacking: pipeline.appliedRetina,
+                qualityBitrate: pipeline.appliedQuality.rawValue,
+                audioEnabled: pipeline.appliedAudioEnabled
+            )
+            let requestedSettings = PipelineSettingsSnapshot(
+                useVirtualDisplay: useVirtualDisplay,
+                resolutionIdentifier: selectedResolution.name,
+                usesRetinaBacking: isRetina,
+                qualityBitrate: selectedQuality.rawValue,
+                audioEnabled: desiredAudioEnabled(for: id)
+            )
+            let actions = PipelineUpdatePolicy.actions(from: appliedSettings, to: requestedSettings)
 
-        // 2. Restart all pipelines with new settings
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
-            for id in self.pipelines.keys {
-                self.startPipeline(for: id)
+            if actions.contains(.rebuildDisplay) {
+                stopPipeline(for: id)
+                if let generation = pipelines[id]?.lifecycleGeneration {
+                    displayRebuilds.append((id, generation))
+                }
+                continue
+            }
+
+            if actions.contains(.updateBitrate) {
+                let bitrate = effectiveBitrate(for: pipeline)
+                let rateLimitWindow: Double = (pipeline.isP2P || pipeline.isWiredCable) ? 0.1 : 1.0
+                pipeline.videoEncoder?.updateBitrate(bitrate, rateLimitWindow: rateLimitWindow)
+                pipelines[id]?.appliedQuality = selectedQuality
+                pipelines[id]?.targetAdaptiveBitrate = bitrate
+                pipelines[id]?.currentAdaptiveBitrate = bitrate
+                pipelines[id]?.sendLatencyEWMA = 0
+                pipelines[id]?.sentFramesSinceAdjustment = 0
+                pipelines[id]?.droppedFramesSinceAdjustment = 0
+                pipelines[id]?.lastBitrateAdjustment = Date()
+                LogManager.shared.log("Sender: Updated bitrate in place for \(pipeline.service.name) to \(bitrate / 1_000_000) Mbps")
+            }
+
+            if actions.contains(.reconcileAudio) {
+                reconcileAudioPipeline(for: id)
             }
         }
+
+        guard !displayRebuilds.isEmpty else { return }
+        // A display mode, backing size, or HiDPI change genuinely requires a
+        // virtual display rebuild. Quality and audio changes never come here.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self = self else { return }
+            for rebuild in displayRebuilds where self.pipelines[rebuild.id] != nil {
+                self.startPipeline(for: rebuild.id, expectedGeneration: rebuild.generation)
+            }
+        }
+    }
+
+    private func effectiveBitrate(for pipeline: ConnectionPipeline) -> Int {
+        if pipeline.isP2P || pipeline.isWiredCable {
+            return selectedQuality.rawValue
+        }
+        if pipeline.isLoopback {
+            return pipeline.isWiFiADB
+                ? min(selectedQuality.rawValue, 10_000_000)
+                : selectedQuality.rawValue
+        }
+        return min(selectedQuality.rawValue, StreamQuality.high.rawValue)
     }
     
     // How long a backgrounded receiver may stay silent before the session is
@@ -4185,6 +4559,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         continue
                     }
 
+                    // ScreenCaptureKit can legitimately produce no complete
+                    // frame while the desktop is static. Keep media transport
+                    // liveness independent from changed video frames.
+                    self.sendMediaHeartbeat(for: pipeline)
+
                     let interval = now.timeIntervalSince(pipeline.lastHeartbeat)
                     if interval > 15.0 {
                         LogManager.shared.log("Sender: Connection to \(pipeline.service.name) timed out (No Heartbeat for 15s)")
@@ -4200,8 +4579,36 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 for id in graceExpiredIds {
                     self.removeConnection(id, attemptReconnect: false, reason: "background grace period expired")
                 }
+
+                if now.timeIntervalSince(self.lastAudioRecoveryCheck) >= 3.0 {
+                    self.lastAudioRecoveryCheck = now
+                    self.recoverAudioPipelines()
+                }
             }
         }
+    }
+
+    private func sendMediaHeartbeat(for pipeline: ConnectionPipeline) {
+        guard pipeline.supportsTypeByte, !pipeline.mediaHeartbeatInProgress else { return }
+
+        let payload = Data([0x04])
+        var lengthPrefix = UInt32(payload.count).bigEndian
+        var packet = Data(bytes: &lengthPrefix, count: MemoryLayout<UInt32>.size)
+        packet.append(payload)
+        let connectionID = pipeline.id
+        let connection = pipeline.connection
+        let serviceName = pipeline.service.name
+        pipelines[connectionID]?.mediaHeartbeatInProgress = true
+        connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+            DispatchQueue.main.async {
+                guard let self,
+                      self.pipelines[connectionID]?.connection === connection else { return }
+                self.pipelines[connectionID]?.mediaHeartbeatInProgress = false
+                if let error {
+                    LogManager.shared.log("Sender: Media heartbeat to \(serviceName) failed: \(error.localizedDescription)")
+                }
+            }
+        })
     }
 
     // MARK: - Auto-reconnect after unexpected drops
@@ -4260,6 +4667,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func removeConnection(_ connectionId: UUID, attemptReconnect: Bool = false, reason: String? = nil) {
+        if let pending = pendingConnections.removeValue(forKey: connectionId) {
+            pending.stateUpdateHandler = nil
+            pending.cancel()
+        }
         guard let pipeline = pipelines[connectionId] else { return }
 
         // Tear down this connection's pipeline
@@ -4320,6 +4731,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     func disconnect() {
         reconnectAttempts.removeAll()
+        let pending = pendingConnections.values
+        pendingConnections.removeAll()
+        connectingServiceNames.removeAll()
+        for connection in pending {
+            connection.stateUpdateHandler = nil
+            connection.cancel()
+        }
         for (id, pipeline) in pipelines {
             pipeline.screenRecorder?.stopCapture()
             pipeline.processAudioCapture?.stop()
@@ -4362,7 +4780,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             let name = connectedDisplays[idx].name
             LogManager.shared.log("Sender: Audio \(enabled ? "enabled" : "disabled") for \(name)")
             if pipelines[connectionId] != nil {
-                updateStreamResolution()
+                reconcileAudioPipeline(for: connectionId)
             }
         }
     }
@@ -4380,6 +4798,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 resolution: res,
                 displayBounds: bounds,
                 audioEnabled: connectedDisplays.first(where: { $0.id == id })?.audioEnabled ?? audioStreamingEnabled,
+                audioState: pipeline.audioState,
                 cgDisplayID: pipeline.virtualDisplayManager?.displayID
             )
         }
@@ -4533,10 +4952,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             if let error {
                 LogManager.shared.log("AudioConnection: Receive error: \(error)")
                 DispatchQueue.main.async {
-                    if self?.pipelines[connectionId]?.audioConnection === connection {
-                        self?.pipelines[connectionId]?.audioConnection = nil
-                        self?.pipelines[connectionId]?.audioSessionKey = nil
-                    }
+                    self?.handleAudioConnectionEnded(
+                        connection,
+                        connectionId: connectionId,
+                        reason: "receive error"
+                    )
                 }
                 return
             }
@@ -4544,10 +4964,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             guard let content, content.count == 4 else {
                 if isComplete {
                     DispatchQueue.main.async {
-                        if self?.pipelines[connectionId]?.audioConnection === connection {
-                            self?.pipelines[connectionId]?.audioConnection = nil
-                            self?.pipelines[connectionId]?.audioSessionKey = nil
-                        }
+                        self?.handleAudioConnectionEnded(
+                            connection,
+                            connectionId: connectionId,
+                            reason: "receiver closed stream"
+                        )
                     }
                 } else {
                     self?.receiveAuxiliary(on: connection, connectionId: connectionId)
@@ -4564,10 +4985,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 LogManager.shared.log("AudioConnection: Rejected frame length \(rawLength) (\(error)) — dropping auxiliary connection")
                 connection.cancel()
                 DispatchQueue.main.async {
-                    if self?.pipelines[connectionId]?.audioConnection === connection {
-                        self?.pipelines[connectionId]?.audioConnection = nil
-                        self?.pipelines[connectionId]?.audioSessionKey = nil
-                    }
+                    self?.handleAudioConnectionEnded(
+                        connection,
+                        connectionId: connectionId,
+                        reason: "invalid frame"
+                    )
                 }
                 return
             }
@@ -4577,10 +4999,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     LogManager.shared.log("AudioConnection: Frame truncated (expected \(bodyLength), got \(body?.count ?? 0))")
                     connection.cancel()
                     DispatchQueue.main.async {
-                        if self?.pipelines[connectionId]?.audioConnection === connection {
-                            self?.pipelines[connectionId]?.audioConnection = nil
-                            self?.pipelines[connectionId]?.audioSessionKey = nil
-                        }
+                        self?.handleAudioConnectionEnded(
+                            connection,
+                            connectionId: connectionId,
+                            reason: "truncated frame"
+                        )
                     }
                     return
                 }
@@ -4639,6 +5062,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     private func stopPipeline(for connectionId: UUID) {
+        pipelines[connectionId]?.lifecycleGeneration &+= 1
         pipelines[connectionId]?.screenRecorder?.stopCapture()
         pipelines[connectionId]?.screenRecorder = nil
         // Resolution and orientation changes run through here while frames are
@@ -4651,20 +5075,32 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         pipelines[connectionId]?.audioConnection = nil
         pipelines[connectionId]?.audioSessionKey = nil
         pipelines[connectionId]?.audioEncoder = nil
+        pipelines[connectionId]?.sendInProgress = false
+        pipelines[connectionId]?.pendingKeyframePacket = nil
+        pipelines[connectionId]?.audioSendInProgress = false
+        pipelines[connectionId]?.pendingAudioPacket = nil
         if let dm = pipelines[connectionId]?.virtualDisplayManager {
             dm.destroyDisplay()
             pipelines[connectionId]?.virtualDisplayManager = nil
         }
     }
 
-    func startPipeline(for connectionId: UUID) {
-        guard pipelines[connectionId] != nil else { return }
+    func startPipeline(for connectionId: UUID, expectedGeneration: UInt64? = nil) {
+        guard let existingPipeline = pipelines[connectionId] else { return }
+        if let expectedGeneration,
+           existingPipeline.lifecycleGeneration != expectedGeneration {
+            LogManager.shared.log("Sender: Ignoring superseded pipeline start for \(existingPipeline.service.name)")
+            return
+        }
+        pipelines[connectionId]?.lifecycleGeneration &+= 1
+        guard let lifecycleGeneration = pipelines[connectionId]?.lifecycleGeneration else { return }
 
         let serviceName = pipelines[connectionId]?.service.name ?? "unknown"
         LogManager.shared.log("Sender: Starting pipeline for \(serviceName)...")
 
         var targetDisplayID: CGDirectDisplayID? = nil
-        let receiverDisplaySize = selectedResolution == VirtualDisplayManager.receiverBestFitResolution
+        let receiverDisplaySize = useVirtualDisplay
+            && selectedResolution == VirtualDisplayManager.receiverBestFitResolution
             ? preferredReceiverDisplaySize(for: connectionId)
             : nil
 
@@ -4674,7 +5110,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             let displayManager = VirtualDisplayManager()
             displayManager.onDisplayBoundsChanged = { [weak self] bounds in
                 DispatchQueue.main.async {
-                    guard let self, self.pipelines[connectionId] != nil else { return }
+                    guard let self,
+                          self.pipelines[connectionId]?.lifecycleGeneration == lifecycleGeneration,
+                          self.pipelines[connectionId]?.virtualDisplayManager === displayManager else { return }
                     InputHandler.shared.updateDisplayBounds(bounds: bounds, for: connectionId)
                     LogManager.shared.log("Sender: Updated display placement for \(serviceName): \(bounds)")
                     self.updateConnectedDisplays()
@@ -4705,6 +5143,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 // Update InputHandler with this connection's display bounds
                 // Retry with increasing delays — macOS may take time to register the virtual display
                 func pollDisplayBounds(attempt: Int) {
+                    guard self.pipelines[connectionId]?.lifecycleGeneration == lifecycleGeneration,
+                          self.pipelines[connectionId]?.virtualDisplayManager === displayManager else { return }
                     let bounds = CGDisplayBounds(displayID)
                     if bounds.width > 0 && bounds.height > 0 {
                         InputHandler.shared.updateDisplayBounds(bounds: bounds, for: connectionId)
@@ -4747,7 +5187,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // Match the virtual display dimensions so macOS default scaling stays stable.
         let captureWidth: Int
         let captureHeight: Int
-        if let receiverDisplaySize {
+        if !useVirtualDisplay {
+            let mainDisplayID = CGMainDisplayID()
+            captureWidth = max(1, Int(CGDisplayPixelsWide(mainDisplayID)))
+            captureHeight = max(1, Int(CGDisplayPixelsHigh(mainDisplayID)))
+            LogManager.shared.log("Sender: Mirror capture follows source display pixels \(captureWidth)x\(captureHeight) for \(serviceName)")
+        } else if let receiverDisplaySize {
             captureWidth = receiverDisplaySize.captureWidth
             captureHeight = receiverDisplaySize.captureHeight
         } else {
@@ -4814,37 +5259,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         encoder.delegate = self
         pipelines[connectionId]?.videoEncoder = encoder
 
-        // Audio encoder (if audio streaming enabled for this connection)
-        let audioEnabled = connectedDisplays.first(where: { $0.id == connectionId })?.audioEnabled ?? audioStreamingEnabled
-        var audioEnc: AudioEncoder? = nil
-        if audioEnabled {
-            let ae = AudioEncoder(connectionId: connectionId)
-            ae.delegate = self
-            pipelines[connectionId]?.audioEncoder = ae
-            audioEnc = ae
-            LogManager.shared.log("Sender: Audio encoder created for \(serviceName)")
-            startDedicatedAudioConnection(for: connectionId)
-        }
-
-        var useScreenCaptureAudio = false
-        if audioEnabled, let audioEnc {
-            let processTap = ProcessAudioTapCapture(
-                bundleIDPrefixes: ["com.google.Chrome"],
-                muteProcess: true
-            ) { audioBufferList, format in
-                audioEnc.encode(audioBufferList: audioBufferList, sourceFormat: format)
-            }
-
-            do {
-                try processTap.start()
-                pipelines[connectionId]?.processAudioCapture = processTap
-                useScreenCaptureAudio = false
-                LogManager.shared.log("Sender: Chrome audio will play on receiver only for \(serviceName)")
-            } catch {
-                LogManager.shared.log("Sender: Chrome-only audio capture unavailable (\(error.localizedDescription)); audio disabled to avoid playing on this Mac")
-            }
-        }
-
         let recorder = ScreenRecorder(
             videoEncoder: encoder,
             targetDisplayID: targetDisplayID,
@@ -4853,16 +5267,154 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             captureFPS: Int32(fps)
         )
         recorder.delegate = self
-        recorder.captureAudio = useScreenCaptureAudio
-        recorder.audioEncoder = useScreenCaptureAudio ? audioEnc : nil
+        recorder.captureAudio = false
+        recorder.audioEncoder = nil
         pipelines[connectionId]?.screenRecorder = recorder
+        pipelines[connectionId]?.appliedUseVirtualDisplay = useVirtualDisplay
+        pipelines[connectionId]?.appliedResolutionName = selectedResolution.name
+        pipelines[connectionId]?.appliedRetina = isRetina
+        pipelines[connectionId]?.appliedQuality = selectedQuality
+        pipelines[connectionId]?.currentAdaptiveBitrate = bitrate
+        pipelines[connectionId]?.targetAdaptiveBitrate = bitrate
+        pipelines[connectionId]?.sendLatencyEWMA = 0
+        pipelines[connectionId]?.sentFramesSinceAdjustment = 0
+        pipelines[connectionId]?.droppedFramesSinceAdjustment = 0
+        pipelines[connectionId]?.lastBitrateAdjustment = Date()
+
+        reconcileAudioPipeline(for: connectionId)
 
         Task {
             await recorder.startCapture()
         }
     }
 
+    private func desiredAudioEnabled(for connectionId: UUID) -> Bool {
+        connectedDisplays.first(where: { $0.id == connectionId })?.audioEnabled
+            ?? audioStreamingEnabled
+    }
+
+    private func setAudioState(_ state: AudioStreamingState, for connectionId: UUID) {
+        guard pipelines[connectionId]?.audioState != state else { return }
+        pipelines[connectionId]?.audioState = state
+        if let index = connectedDisplays.firstIndex(where: { $0.id == connectionId }) {
+            connectedDisplays[index].audioState = state
+        }
+    }
+
+    /// Retry only the auxiliary audio branch. Video capture, the encoder, and
+    /// the virtual display stay untouched while Chrome appears or the audio TCP
+    /// transport reconnects.
+    private func recoverAudioPipelines() {
+        for connectionId in Array(pipelines.keys) {
+            guard let pipeline = pipelines[connectionId],
+                  desiredAudioEnabled(for: connectionId),
+                  pipeline.backgroundGraceStart == nil,
+                  pipeline.audioState != .failed else {
+                continue
+            }
+
+            if let processTap = pipeline.processAudioCapture,
+               processTap.requiresRebuildForCurrentProcesses() {
+                LogManager.shared.log("Sender: Chrome audio process set changed; rebuilding audio branch for \(pipeline.service.name)")
+                stopAudioPipeline(for: connectionId)
+                setAudioState(.retrying, for: connectionId)
+            }
+
+            guard let currentPipeline = pipelines[connectionId] else { continue }
+            if currentPipeline.processAudioCapture == nil || currentPipeline.audioConnection == nil {
+                reconcileAudioPipeline(for: connectionId)
+            }
+        }
+    }
+
+    private func reconcileAudioPipeline(for connectionId: UUID) {
+        guard let pipeline = pipelines[connectionId] else { return }
+        let shouldEnable = desiredAudioEnabled(for: connectionId)
+
+        if !shouldEnable {
+            stopAudioPipeline(for: connectionId)
+            pipelines[connectionId]?.appliedAudioEnabled = false
+            return
+        }
+
+        if pipeline.processAudioCapture != nil {
+            if pipeline.audioConnection == nil {
+                startDedicatedAudioConnection(for: connectionId)
+            }
+            pipelines[connectionId]?.appliedAudioEnabled = true
+            return
+        }
+
+        let audioEncoder = AudioEncoder(connectionId: connectionId)
+        audioEncoder.delegate = self
+        let processTap = ProcessAudioTapCapture(
+            bundleIDPrefixes: ["com.google.Chrome"],
+            muteProcess: true
+        ) { audioBufferList, format in
+            audioEncoder.encode(audioBufferList: audioBufferList, sourceFormat: format)
+        }
+
+        do {
+            try processTap.start()
+            pipelines[connectionId]?.audioEncoder = audioEncoder
+            pipelines[connectionId]?.processAudioCapture = processTap
+            pipelines[connectionId]?.appliedAudioEnabled = true
+            setAudioState(.connecting, for: connectionId)
+            startDedicatedAudioConnection(for: connectionId)
+            LogManager.shared.log("Sender: Chrome audio capture enabled without rebuilding display for \(pipeline.service.name)")
+        } catch let error as ProcessAudioTapCaptureError {
+            audioEncoder.delegate = nil
+            pipelines[connectionId]?.audioEncoder = nil
+            pipelines[connectionId]?.processAudioCapture = nil
+            pipelines[connectionId]?.appliedAudioEnabled = false
+            switch error {
+            case .noMatchingAudioProcess:
+                setAudioState(.waitingForChrome, for: connectionId)
+            case .unsupportedOS:
+                setAudioState(.failed, for: connectionId)
+            default:
+                setAudioState(.retrying, for: connectionId)
+            }
+            LogManager.shared.log("Sender: Chrome-only audio capture unavailable (\(error.localizedDescription)); video/display remain active")
+        } catch {
+            audioEncoder.delegate = nil
+            pipelines[connectionId]?.audioEncoder = nil
+            pipelines[connectionId]?.processAudioCapture = nil
+            pipelines[connectionId]?.appliedAudioEnabled = false
+            setAudioState(.retrying, for: connectionId)
+            LogManager.shared.log("Sender: Chrome-only audio capture unavailable (\(error.localizedDescription)); video/display remain active")
+        }
+    }
+
+    private func stopAudioPipeline(for connectionId: UUID) {
+        guard let pipeline = pipelines[connectionId] else { return }
+        let hadAudioResources = pipeline.processAudioCapture != nil
+            || pipeline.audioConnection != nil
+            || pipeline.audioEncoder != nil
+        pipeline.processAudioCapture?.stop()
+        pipeline.audioConnection?.stateUpdateHandler = nil
+        pipeline.audioConnection?.cancel()
+        pipeline.audioEncoder?.delegate = nil
+        pipelines[connectionId]?.processAudioCapture = nil
+        pipelines[connectionId]?.audioConnection = nil
+        pipelines[connectionId]?.audioSessionKey = nil
+        pipelines[connectionId]?.audioEncoder = nil
+        pipelines[connectionId]?.audioSendInProgress = false
+        pipelines[connectionId]?.pendingAudioPacket = nil
+        setAudioState(.off, for: connectionId)
+        if hadAudioResources {
+            LogManager.shared.log("Sender: Audio pipeline stopped without rebuilding display for \(pipeline.service.name)")
+        }
+    }
+
     func screenRecorderDidFailToStart(_ recorder: ScreenRecorder, reason: String) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self, weak recorder] in
+                guard let self, let recorder else { return }
+                self.screenRecorderDidFailToStart(recorder, reason: reason)
+            }
+            return
+        }
         guard let entry = pipelines.first(where: { $0.value.screenRecorder === recorder }) else { return }
         LogManager.shared.log("Sender: Screen capture did not start for \(entry.value.service.name): \(reason)")
         DispatchQueue.main.async {
@@ -4873,6 +5425,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func screenRecorderDidStopUnexpectedly(_ recorder: ScreenRecorder) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self, weak recorder] in
+                guard let self, let recorder else { return }
+                self.screenRecorderDidStopUnexpectedly(recorder)
+            }
+            return
+        }
         guard let entry = pipelines.first(where: { $0.value.screenRecorder === recorder }) else { return }
         LogManager.shared.log("Sender: Screen sharing stopped by system for \(entry.value.service.name)")
         removeConnection(entry.key)
@@ -4937,7 +5496,23 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private var encodedFrameCount: Int = 0
 
     func videoEncoder(_ encoder: VideoEncoder, didEncode data: Data, for connectionId: UUID, isKeyframe: Bool) {
-        guard let pipeline = pipelines[connectionId] else { return }
+        // VideoToolbox callbacks arrive on VideoEncoder's callback queue. Keep
+        // every pipeline mutation on NetworkClient's main-queue owner.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self, weak encoder] in
+                guard let self, let encoder else { return }
+                self.videoEncoder(
+                    encoder,
+                    didEncode: data,
+                    for: connectionId,
+                    isKeyframe: isKeyframe
+                )
+            }
+            return
+        }
+
+        guard let pipeline = pipelines[connectionId],
+              pipeline.videoEncoder === encoder else { return }
 
         // Background grace: receiver is suspended and can't drain the socket.
         // Drop all frames (including keyframes) so nothing queues in the
@@ -4951,16 +5526,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         // Determine if this connection uses TCP framing (ADB/localhost always TCP, else follow global)
         let useTCP = pipeline.forceTCP || connectionType != "UDP"
-
-        // TCP backpressure: skip P-frame if previous send still in flight.
-        // NEVER drop keyframes — the decoder needs them to recover.
-        // P2P / Loopback / wired iPad USB: no completion backpressure (reliable links).
-        // Infrastructure only: completion-based backpressure.
-        if !pipeline.isP2P && !pipeline.isLoopback && !pipeline.isWiredCable && useTCP && !isKeyframe {
-            if pipeline.sendInProgress {
-                return
-            }
-        }
 
         if !useTCP {
             let mtu = 1000
@@ -5039,37 +5604,144 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 packet.append(data)
             }
 
-            bytesSentWindow += packet.count
-
-            // Mark send in progress for backpressure (infrastructure only)
-            if !pipeline.isP2P {
-                pipelines[connectionId]?.sendInProgress = true
-                pipelines[connectionId]?.lastSendTimeNs = DispatchTime.now().uptimeNanoseconds
-            }
-
-            pipeline.connection.send(content: packet, completion: .contentProcessed { [weak self] error in
-                DispatchQueue.main.async { [weak self] in
-                    self?.pipelines[connectionId]?.sendInProgress = false
-                }
-                if let error = error {
-                    LogManager.shared.log("Sender: TCP Send Error to \(pipeline.service.name): \(error)")
-                    DispatchQueue.main.async { [weak self] in
-                        self?.pipelines[connectionId]?.sendInProgress = false
-                    }
-                }
-            })
+            enqueueVideoPacket(packet, isKeyframe: isKeyframe, for: connectionId)
         }
+    }
+
+    private func enqueueVideoPacket(_ packet: Data, isKeyframe: Bool, for connectionId: UUID) {
+        guard let pipeline = pipelines[connectionId] else { return }
+
+        if pipeline.sendInProgress {
+            if isKeyframe {
+                if pipeline.pendingKeyframePacket != nil {
+                    pipelines[connectionId]?.droppedFramesSinceAdjustment += 1
+                }
+                // Retain only the newest recovery point. This bounds the queue
+                // while guaranteeing a keyframe follows the in-flight packet.
+                pipelines[connectionId]?.pendingKeyframePacket = packet
+            } else {
+                pipelines[connectionId]?.droppedFramesSinceAdjustment += 1
+            }
+            maybeAdjustBitrate(for: connectionId)
+            return
+        }
+
+        pipelines[connectionId]?.sendInProgress = true
+        bytesSentWindow += packet.count
+        let connection = pipeline.connection
+        let serviceName = pipeline.service.name
+        let lifecycleGeneration = pipeline.lifecycleGeneration
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+
+        connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+            DispatchQueue.main.async {
+                self?.finishVideoSend(
+                    on: connection,
+                    connectionId: connectionId,
+                    serviceName: serviceName,
+                    lifecycleGeneration: lifecycleGeneration,
+                    startedAt: startedAt,
+                    error: error
+                )
+            }
+        })
+    }
+
+    private func finishVideoSend(
+        on connection: NWConnection,
+        connectionId: UUID,
+        serviceName: String,
+        lifecycleGeneration: UInt64,
+        startedAt: UInt64,
+        error: NWError?
+    ) {
+        guard let pipeline = pipelines[connectionId],
+              pipeline.connection === connection,
+              pipeline.lifecycleGeneration == lifecycleGeneration else { return }
+
+        pipelines[connectionId]?.sendInProgress = false
+
+        if let error {
+            pipelines[connectionId]?.pendingKeyframePacket = nil
+            LogManager.shared.log("Sender: TCP send error to \(serviceName): \(error)")
+            return
+        }
+
+        let elapsedNanos = DispatchTime.now().uptimeNanoseconds - startedAt
+        let latency = TimeInterval(elapsedNanos) / 1_000_000_000
+        let previousEWMA = pipeline.sendLatencyEWMA
+        pipelines[connectionId]?.sendLatencyEWMA = previousEWMA == 0
+            ? latency
+            : (previousEWMA * 0.8) + (latency * 0.2)
+        pipelines[connectionId]?.sentFramesSinceAdjustment += 1
+        maybeAdjustBitrate(for: connectionId)
+
+        if let pendingKeyframe = pipelines[connectionId]?.pendingKeyframePacket {
+            pipelines[connectionId]?.pendingKeyframePacket = nil
+            enqueueVideoPacket(pendingKeyframe, isKeyframe: true, for: connectionId)
+        }
+    }
+
+    private func maybeAdjustBitrate(for connectionId: UUID) {
+        guard let pipeline = pipelines[connectionId],
+              pipeline.currentAdaptiveBitrate > 0,
+              pipeline.targetAdaptiveBitrate > 0,
+              Date().timeIntervalSince(pipeline.lastBitrateAdjustment) >= 2.0 else {
+            return
+        }
+
+        let recommendation = AdaptiveBitratePolicy.recommendedBitrate(
+            currentBitrate: pipeline.currentAdaptiveBitrate,
+            targetBitrate: pipeline.targetAdaptiveBitrate,
+            sendLatencyEWMA: pipeline.sendLatencyEWMA,
+            sentFrames: pipeline.sentFramesSinceAdjustment,
+            droppedFrames: pipeline.droppedFramesSinceAdjustment
+        )
+
+        pipelines[connectionId]?.sentFramesSinceAdjustment = 0
+        pipelines[connectionId]?.droppedFramesSinceAdjustment = 0
+        pipelines[connectionId]?.lastBitrateAdjustment = Date()
+
+        guard recommendation != pipeline.currentAdaptiveBitrate else { return }
+        pipelines[connectionId]?.currentAdaptiveBitrate = recommendation
+        let rateLimitWindow: Double = (pipeline.isP2P || pipeline.isWiredCable) ? 0.1 : 1.0
+        pipeline.videoEncoder?.updateBitrate(recommendation, rateLimitWindow: rateLimitWindow)
+        LogManager.shared.log(
+            "Sender: Adaptive bitrate for \(pipeline.service.name) -> \(recommendation / 1_000_000) Mbps "
+                + "(latency \(Int(pipeline.sendLatencyEWMA * 1_000))ms, drops \(pipeline.droppedFramesSinceAdjustment))"
+        )
     }
 
     // AudioEncoderDelegate - Send AAC audio to the specific connection
     func audioEncoder(_ encoder: AudioEncoder, didEncode data: Data, for connectionId: UUID) {
-        guard let pipeline = pipelines[connectionId] else { return }
+        // ProcessAudioTapCapture invokes its handler on a Core Audio queue, while
+        // NetworkClient owns pipeline state on the main queue.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self, weak encoder] in
+                guard let self, let encoder else { return }
+                self.audioEncoder(encoder, didEncode: data, for: connectionId)
+            }
+            return
+        }
+
+        guard let pipeline = pipelines[connectionId],
+              pipeline.audioEncoder === encoder else { return }
 
         // Background grace: receiver is suspended — don't queue audio either.
         if pipeline.backgroundGraceStart != nil { return }
 
         // Legacy receivers (iOS/Mac Swift) don't support audio — skip
         guard pipeline.supportsTypeByte else { return }
+
+        // Never send media before the auxiliary handshake finishes. Doing so
+        // interleaves AAC frames with the length-prefixed pairing exchange and
+        // corrupts both sides. Audio also never falls back to the main video
+        // transport because protocol v2 assigns each connection one role.
+        guard let audioConnection = pipeline.audioConnection,
+              pipeline.audioSessionKey != nil,
+              pipeline.audioState == .streaming else {
+            return
+        }
 
         // Audio always uses TCP framing
         // Format: [4-byte length][1-byte type: 0x02=audio][AAC data]
@@ -5079,15 +5751,65 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         var packet = Data(bytes: &lengthPrefix, count: 4)
         packet.append(typedPayload)
 
+        enqueueAudioPacket(packet, on: audioConnection, for: connectionId)
+    }
+
+    private func enqueueAudioPacket(
+        _ packet: Data,
+        on connection: NWConnection,
+        for connectionId: UUID
+    ) {
+        guard let pipeline = pipelines[connectionId],
+              pipeline.audioConnection === connection,
+              pipeline.audioState == .streaming else { return }
+
+        if pipeline.audioSendInProgress {
+            // AAC-LC packets are independently decodable. Keep only the newest
+            // pending packet so congestion creates a short gap, not seconds of
+            // accumulated playback latency.
+            pipelines[connectionId]?.pendingAudioPacket = packet
+            return
+        }
+
+        pipelines[connectionId]?.audioSendInProgress = true
         bytesSentWindow += packet.count
-
-        let audioConnection = pipeline.audioConnection ?? pipeline.connection
-        let usingDedicatedAudio = pipeline.audioConnection != nil
-
-        audioConnection.send(content: packet, completion: .contentProcessed { error in
-            if let error = error {
-                LogManager.shared.log("Sender: Audio send error to \(pipeline.service.name) (\(usingDedicatedAudio ? "dedicated" : "main")): \(error)")
+        let serviceName = pipeline.service.name
+        connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+            DispatchQueue.main.async {
+                self?.finishAudioSend(
+                    on: connection,
+                    connectionId: connectionId,
+                    serviceName: serviceName,
+                    error: error
+                )
             }
         })
+    }
+
+    private func finishAudioSend(
+        on connection: NWConnection,
+        connectionId: UUID,
+        serviceName: String,
+        error: NWError?
+    ) {
+        guard let pipeline = pipelines[connectionId],
+              pipeline.audioConnection === connection else { return }
+
+        pipelines[connectionId]?.audioSendInProgress = false
+        if let error {
+            pipelines[connectionId]?.pendingAudioPacket = nil
+            LogManager.shared.log("Sender: Audio send error to \(serviceName) (dedicated): \(error)")
+            handleAudioConnectionEnded(
+                connection,
+                connectionId: connectionId,
+                reason: "send error"
+            )
+            return
+        }
+
+        if let pending = pipelines[connectionId]?.pendingAudioPacket {
+            pipelines[connectionId]?.pendingAudioPacket = nil
+            enqueueAudioPacket(pending, on: connection, for: connectionId)
+        }
     }
 }

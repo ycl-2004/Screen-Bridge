@@ -183,7 +183,7 @@ class VideoRenderer: ObservableObject {
         
         // Critical: Set timebase to run immediately
         var timebase: CMTimebase?
-        CMTimebaseCreateWithMasterClock(allocator: kCFAllocatorDefault, masterClock: CMClockGetHostTimeClock(), timebaseOut: &timebase)
+        CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &timebase)
         if let timebase = timebase {
             displayLayer.controlTimebase = timebase
             CMTimebaseSetRate(timebase, rate: 1.0)

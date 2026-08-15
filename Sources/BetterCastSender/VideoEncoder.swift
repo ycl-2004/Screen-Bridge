@@ -2,6 +2,20 @@ import Foundation
 import VideoToolbox
 import CoreMedia
 
+/// Runs the frame owner's cleanup exactly once after VideoToolbox finishes
+/// with an asynchronously submitted image buffer.
+private final class VideoFrameCompletionToken {
+    private let completion: () -> Void
+
+    init(completion: @escaping () -> Void) {
+        self.completion = completion
+    }
+
+    deinit {
+        completion()
+    }
+}
+
 protocol VideoEncoderDelegate: AnyObject {
     func videoEncoder(_ encoder: VideoEncoder, didEncode data: Data, for connectionId: UUID, isKeyframe: Bool)
 }
@@ -11,7 +25,7 @@ class VideoEncoder {
     let connectionId: UUID
     private var compressionSession: VTCompressionSession?
     private var frameCount = 0
-    private let bitrate: Int
+    private var bitrate: Int
 
     /// Guards the session against use after teardown.
     ///
@@ -19,7 +33,9 @@ class VideoEncoder {
     /// session that outlives this object would call back into freed memory.
     /// `invalidate()` drains and tears the session down before that can happen,
     /// and `deinit` is the backstop for callers that forget.
-    private let sessionLock = NSLock()
+    private let encoderQueue = DispatchQueue(label: "com.yccast.video-encoder.lifecycle")
+    private let encoderQueueKey = DispatchSpecificKey<UInt8>()
+    private let callbackQueue = DispatchQueue(label: "com.yccast.video-encoder.callback")
     private var isInvalidated = false
 
     // Cache for headers so we can re-send them if needed
@@ -37,6 +53,7 @@ class VideoEncoder {
         self.bitrate = bitrate
         self.expectedFPS = expectedFPS
         self.keyframeThrottleInterval = max(0.3, keyframeIntervalSeconds / 3.0) // Allow forced keyframes at 1/3 the interval
+        encoderQueue.setSpecific(key: encoderQueueKey, value: 1)
         
         let status = VTCompressionSessionCreate(
             allocator: nil,
@@ -46,7 +63,14 @@ class VideoEncoder {
             encoderSpecification: nil,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
-            outputCallback: { (outputCallbackRefCon, _, status, flags, sampleBuffer) in
+            outputCallback: { (outputCallbackRefCon, sourceFrameRefCon, status, flags, sampleBuffer) in
+                // The source-frame token is independent of the encoder object:
+                // always release it even if the session reports an error.
+                if let sourceFrameRefCon {
+                    Unmanaged<VideoFrameCompletionToken>
+                        .fromOpaque(sourceFrameRefCon)
+                        .release()
+                }
                 guard let refCon = outputCallbackRefCon else { return }
                 let encoder = Unmanaged<VideoEncoder>.fromOpaque(refCon).takeUnretainedValue()
                 encoder.compressionCallback(status: status, flags: flags, sampleBuffer: sampleBuffer)
@@ -107,15 +131,13 @@ class VideoEncoder {
     /// VideoToolbox will not deliver further callbacks for this encoder, which is
     /// what makes the unretained callback reference safe.
     func invalidate() {
-        sessionLock.lock()
-        if isInvalidated {
-            sessionLock.unlock()
-            return
+        let session: VTCompressionSession? = syncOnEncoderQueue {
+            guard !isInvalidated else { return nil }
+            isInvalidated = true
+            let current = compressionSession
+            compressionSession = nil
+            return current
         }
-        isInvalidated = true
-        let session = compressionSession
-        compressionSession = nil
-        sessionLock.unlock()
 
         guard let session else { return }
         // Order matters: finish outstanding frames first, otherwise their
@@ -126,58 +148,143 @@ class VideoEncoder {
     }
 
     func forceKeyframe() {
-        LogManager.shared.log("VideoEncoder: Keyframe Requested")
-        pendingKeyFrameRequest = true
+        encoderQueue.async { [weak self] in
+            guard let self, !self.isInvalidated else { return }
+            LogManager.shared.log("VideoEncoder: Keyframe Requested")
+            self.pendingKeyFrameRequest = true
+        }
     }
 
     func encode(sampleBuffer: CMSampleBuffer) {
-        sessionLock.lock()
-        let session = compressionSession
-        sessionLock.unlock()
+        encoderQueue.async { [weak self] in
+            guard let self,
+                  !self.isInvalidated,
+                  let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        guard let session,
-              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            let presentationTimestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            let duration = CMSampleBufferGetDuration(sampleBuffer)
 
-        let presentationTimestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let duration = CMSampleBufferGetDuration(sampleBuffer)
-        
+            self.encode(
+                imageBuffer: imageBuffer,
+                presentationTimestamp: presentationTimestamp,
+                duration: duration,
+                completion: nil
+            )
+        }
+    }
+
+    /// Encodes a pixel buffer whose backing storage has an external lifetime.
+    /// `onCompleted` is called exactly once after VideoToolbox is finished with
+    /// it, including early rejection during teardown.
+    func encode(
+        pixelBuffer: CVPixelBuffer,
+        presentationTimestamp: CMTime,
+        duration: CMTime,
+        onCompleted: @escaping () -> Void
+    ) {
+        encoderQueue.async { [weak self] in
+            guard let self else {
+                onCompleted()
+                return
+            }
+
+            self.encode(
+                imageBuffer: pixelBuffer,
+                presentationTimestamp: presentationTimestamp,
+                duration: duration,
+                completion: onCompleted
+            )
+        }
+    }
+
+    private func encode(
+        imageBuffer: CVImageBuffer,
+        presentationTimestamp: CMTime,
+        duration: CMTime,
+        completion: (() -> Void)?
+    ) {
+        guard !isInvalidated, let session = compressionSession else {
+            completion?()
+            return
+        }
+
         frameCount += 1
         var frameProperties: [String: Any] = [:]
-        
-        // Force keyframe if requested or first frame
-        // Throttle forced keyframes — see keyframeThrottleInterval init
+
+        // Force keyframe if requested or first frame. These fields have the
+        // same serial owner as encode and invalidate.
         let timeSinceLastKeyFrame = Date().timeIntervalSince(lastKeyFrameTime)
-        
+
         if frameCount == 1 || (pendingKeyFrameRequest && timeSinceLastKeyFrame > keyframeThrottleInterval) {
-             LogManager.shared.log("VideoEncoder: Forcing Keyframe (Frame \(frameCount))")
-             frameProperties[kVTEncodeFrameOptionKey_ForceKeyFrame as String] = kCFBooleanTrue
-             pendingKeyFrameRequest = false
-             lastKeyFrameTime = Date()
+            LogManager.shared.log("VideoEncoder: Forcing Keyframe (Frame \(frameCount))")
+            frameProperties[kVTEncodeFrameOptionKey_ForceKeyFrame as String] = kCFBooleanTrue
+            pendingKeyFrameRequest = false
+            lastKeyFrameTime = Date()
         } else if pendingKeyFrameRequest {
-             // Request ignored due to throttling
-             LogManager.shared.log("VideoEncoder: Keyframe Request Throttled (Last: \(timeSinceLastKeyFrame)s ago)")
-             pendingKeyFrameRequest = false // Clear it so we don't queue likely stale requests
+            LogManager.shared.log("VideoEncoder: Keyframe Request Throttled (Last: \(timeSinceLastKeyFrame)s ago)")
+            pendingKeyFrameRequest = false
         }
-        
+
+        let completionToken = completion.map(VideoFrameCompletionToken.init)
+        let completionRef = completionToken.map {
+            Unmanaged.passRetained($0).toOpaque()
+        }
+
+        var infoFlags: VTEncodeInfoFlags = []
         let status = VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: imageBuffer,
             presentationTimeStamp: presentationTimestamp,
             duration: duration,
             frameProperties: frameProperties as CFDictionary,
-            sourceFrameRefcon: nil,
-            infoFlagsOut: nil
+            sourceFrameRefcon: completionRef,
+            infoFlagsOut: &infoFlags
         )
-        
-        if status != noErr {
-             LogManager.shared.log("VideoEncoder: Encode failed \(status)")
+
+        if status != noErr || infoFlags.contains(.frameDropped) {
+            // A synchronously rejected/dropped frame never reaches the output
+            // callback, so release its external surface here.
+            if let completionRef {
+                Unmanaged<VideoFrameCompletionToken>
+                    .fromOpaque(completionRef)
+                    .release()
+            }
+            if status != noErr {
+                LogManager.shared.log("VideoEncoder: Encode failed \(status)")
+            }
         }
+    }
+
+    func updateBitrate(_ newBitrate: Int, rateLimitWindow: Double) {
+        encoderQueue.async { [weak self] in
+            guard let self,
+                  !self.isInvalidated,
+                  let session = self.compressionSession else { return }
+            self.bitrate = newBitrate
+            let bitrateCF = newBitrate as CFNumber
+            let bytesPerWindow = Int(Double(newBitrate / 8) * 1.5 * rateLimitWindow)
+            let limitCF = [bytesPerWindow, rateLimitWindow] as CFArray
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrateCF)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limitCF)
+            LogManager.shared.log("VideoEncoder: Updated bitrate to \(newBitrate / 1_000_000)Mbps")
+        }
+    }
+
+    private func syncOnEncoderQueue<T>(_ work: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: encoderQueueKey) != nil {
+            return work()
+        }
+        return encoderQueue.sync(execute: work)
     }
     
     private func compressionCallback(status: OSStatus, flags: VTEncodeInfoFlags, sampleBuffer: CMSampleBuffer?) {
-        guard let sampleBuffer = sampleBuffer, status == noErr else {
-            return
+        guard let sampleBuffer, status == noErr else { return }
+        callbackQueue.async { [weak self] in
+            self?.processEncodedSampleBuffer(sampleBuffer)
         }
+    }
+
+    private func processEncodedSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
         
         // Extract timestamp
         let presentationTimeStamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)

@@ -147,3 +147,67 @@ public enum AVCCParser {
         AVCCParseResult(sps: nil, pps: nil, containsKeyframe: false, isMalformed: true)
     }
 }
+
+public enum MediaLivenessFailure: String, Equatable, Sendable {
+    case transportHeartbeatStopped
+    case noDecodableFirstFrame
+    case decoderStalled
+    case rendererStalled
+}
+
+/// Pure, testable health policy for a receiver media session. Dates represent
+/// distinct progress boundaries; receiving a packet never advances decode or
+/// render progress implicitly.
+public struct MediaLivenessSnapshot: Equatable, Sendable {
+    public let sessionStartedAt: Date
+    public let lastMediaHeartbeat: Date
+    public let lastVideoAccessUnitReceived: Date
+    public let lastVideoDecoded: Date
+    public let lastVideoRendered: Date
+    public let hasDecodedFrame: Bool
+    public let hasRenderedFrame: Bool
+
+    public init(
+        sessionStartedAt: Date,
+        lastMediaHeartbeat: Date,
+        lastVideoAccessUnitReceived: Date,
+        lastVideoDecoded: Date,
+        lastVideoRendered: Date,
+        hasDecodedFrame: Bool,
+        hasRenderedFrame: Bool
+    ) {
+        self.sessionStartedAt = sessionStartedAt
+        self.lastMediaHeartbeat = lastMediaHeartbeat
+        self.lastVideoAccessUnitReceived = lastVideoAccessUnitReceived
+        self.lastVideoDecoded = lastVideoDecoded
+        self.lastVideoRendered = lastVideoRendered
+        self.hasDecodedFrame = hasDecodedFrame
+        self.hasRenderedFrame = hasRenderedFrame
+    }
+}
+
+public enum MediaLivenessEvaluator {
+    public static func failure(
+        for snapshot: MediaLivenessSnapshot,
+        now: Date,
+        timeout: TimeInterval
+    ) -> MediaLivenessFailure? {
+        if now.timeIntervalSince(snapshot.lastMediaHeartbeat) > timeout {
+            return .transportHeartbeatStopped
+        }
+        if !snapshot.hasRenderedFrame,
+           now.timeIntervalSince(snapshot.sessionStartedAt) > timeout {
+            return .noDecodableFirstFrame
+        }
+        if snapshot.lastVideoAccessUnitReceived > snapshot.lastVideoDecoded,
+           now.timeIntervalSince(snapshot.lastVideoDecoded) > timeout {
+            return .decoderStalled
+        }
+        if snapshot.hasDecodedFrame,
+           snapshot.lastVideoDecoded > snapshot.lastVideoRendered,
+           now.timeIntervalSince(snapshot.lastVideoRendered) > timeout {
+            return .rendererStalled
+        }
+        return nil
+    }
+}

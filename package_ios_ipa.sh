@@ -3,73 +3,82 @@ set -euo pipefail
 
 VERSION="${VERSION:-v8}"
 CONFIGURATION="${CONFIGURATION:-Release}"
-DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-Build/DerivedData}"
-BINARY_PATH="${BINARY_PATH:-$DERIVED_DATA_PATH/Build/Products/${CONFIGURATION}-iphoneos/BetterCastReceiverIOS}"
-PLIST_PATH="${PLIST_PATH:-Sources/BetterCastReceiverIOS/Info.plist}"
-ICON_PATH="${ICON_PATH:-Sources/BetterCastReceiverIOS/Assets.xcassets/AppIcon.appiconset/AppIcon.png}"
+PROJECT_PATH="${PROJECT_PATH:-BetterCastIOS.xcodeproj}"
+SCHEME="${SCHEME:-BetterCastReceiverIOS}"
+EXPORT_OPTIONS_PLIST="${EXPORT_OPTIONS_PLIST:-}"
 OUTPUT_IPA="${OUTPUT_IPA:-YC-Cast-Receiver-iOS-${VERSION}.ipa}"
-PACKAGE_DIR="${PACKAGE_DIR:-ios_packaging}"
-APP_BUNDLE_NAME="${APP_BUNDLE_NAME:-YC Cast.app}"
-EXECUTABLE_NAME="BetterCastReceiverIOS"
+OVERWRITE="${OVERWRITE:-0}"
+ALLOW_PROVISIONING_UPDATES="${ALLOW_PROVISIONING_UPDATES:-0}"
 
 echo "=================================="
-echo "  YC Cast iOS IPA Packager $VERSION"
+echo "  YC Cast iOS Archive + Export $VERSION"
 echo "=================================="
 
-if [ ! -f "$BINARY_PATH" ]; then
-    echo "Binary not found at: $BINARY_PATH"
-    echo "Build the receiver first, for example:"
-    echo "xcodebuild -project BetterCastIOS.xcodeproj -scheme BetterCastReceiverIOS -configuration $CONFIGURATION -destination 'generic/platform=iOS' -derivedDataPath $DERIVED_DATA_PATH build"
-    exit 1
+if [ -z "$EXPORT_OPTIONS_PLIST" ] || [ ! -f "$EXPORT_OPTIONS_PLIST" ]; then
+    echo "ERROR: EXPORT_OPTIONS_PLIST must point to an Xcode export-options plist."
+    echo "Use method 'debugging' for a Personal/Development Team device install,"
+    echo "or the distribution method appropriate for your Apple account."
+    echo "Example:"
+    echo "  EXPORT_OPTIONS_PLIST=/absolute/path/ExportOptions.plist ./package_ios_ipa.sh"
+    exit 2
 fi
 
-if [ ! -f "$PLIST_PATH" ]; then
-    echo "Info.plist not found at: $PLIST_PATH"
-    exit 1
+if [ ! -d "$PROJECT_PATH" ]; then
+    echo "ERROR: Xcode project not found: $PROJECT_PATH"
+    exit 2
 fi
 
-echo "Cleaning old packaging..."
-rm -rf "$PACKAGE_DIR" "$OUTPUT_IPA"
-
-APP_DIR="$PACKAGE_DIR/Payload/$APP_BUNDLE_NAME"
-mkdir -p "$APP_DIR/Frameworks"
-
-echo "Copying app files..."
-cp "$BINARY_PATH" "$APP_DIR/$EXECUTABLE_NAME"
-cp "$PLIST_PATH" "$APP_DIR/Info.plist"
-chmod +x "$APP_DIR/$EXECUTABLE_NAME"
-
-if [ -f "$ICON_PATH" ]; then
-    cp "$ICON_PATH" "$APP_DIR/AppIcon.png"
-else
-    echo "Icon not found at $ICON_PATH; continuing without a loose icon file."
+if [ -e "$OUTPUT_IPA" ] && [ "$OVERWRITE" != "1" ]; then
+    echo "ERROR: output already exists: $OUTPUT_IPA"
+    echo "Move it, choose OUTPUT_IPA, or set OVERWRITE=1."
+    exit 2
 fi
 
-SWIFT_LIB_PATH="${SWIFT_LIB_PATH:-/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/iphoneos}"
-if [ -d "$SWIFT_LIB_PATH" ]; then
-    echo "Bundling available Swift runtime libraries..."
-    COPIED_COUNT=0
-    for lib in libswiftCore.dylib libswiftFoundation.dylib libswiftNetwork.dylib libswiftDispatch.dylib libswiftObjectiveC.dylib libswiftDarwin.dylib libswiftCoreMedia.dylib libswiftCoreFoundation.dylib libswiftAVFoundation.dylib libswiftVideoToolbox.dylib libswiftUIKit.dylib libswiftCoreImage.dylib libswiftCoreGraphics.dylib libswiftCoreAudio.dylib libswiftMetal.dylib libswiftQuartzCore.dylib libswiftos.dylib libswiftsimd.dylib; do
-        if [ -f "$SWIFT_LIB_PATH/$lib" ]; then
-            cp "$SWIFT_LIB_PATH/$lib" "$APP_DIR/Frameworks/"
-            COPIED_COUNT=$((COPIED_COUNT + 1))
-        fi
-    done
-    echo "Copied $COPIED_COUNT Swift runtime libraries."
-else
-    echo "Swift runtime folder not found; skipping runtime library copy."
-fi
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/yc-cast-ipa.XXXXXX")"
+ARCHIVE_PATH="$WORK_DIR/YC-Cast.xcarchive"
+EXPORT_PATH="$WORK_DIR/export"
+cleanup() {
+    rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
 
-echo "Creating IPA archive..."
-(
-    cd "$PACKAGE_DIR"
-    zip -r -q "../$OUTPUT_IPA" Payload
+ARCHIVE_ARGS=(
+    -project "$PROJECT_PATH"
+    -scheme "$SCHEME"
+    -configuration "$CONFIGURATION"
+    -destination "generic/platform=iOS"
+    -archivePath "$ARCHIVE_PATH"
+    archive
 )
 
-rm -rf "$PACKAGE_DIR"
+EXPORT_ARGS=(
+    -exportArchive
+    -archivePath "$ARCHIVE_PATH"
+    -exportPath "$EXPORT_PATH"
+    -exportOptionsPlist "$EXPORT_OPTIONS_PLIST"
+)
 
-IPA_SIZE=$(du -h "$OUTPUT_IPA" | cut -f1)
+if [ "$ALLOW_PROVISIONING_UPDATES" = "1" ]; then
+    ARCHIVE_ARGS+=( -allowProvisioningUpdates -allowProvisioningDeviceRegistration )
+    EXPORT_ARGS+=( -allowProvisioningUpdates )
+fi
+
+echo "Archiving signed iOS app with Xcode..."
+xcodebuild "${ARCHIVE_ARGS[@]}"
+
+echo "Exporting IPA with Xcode..."
+xcodebuild "${EXPORT_ARGS[@]}"
+
+EXPORTED_IPAS=( "$EXPORT_PATH"/*.ipa )
+if [ "${#EXPORTED_IPAS[@]}" -ne 1 ] || [ ! -f "${EXPORTED_IPAS[0]}" ]; then
+    echo "ERROR: Xcode export did not produce exactly one IPA."
+    exit 1
+fi
+
+cp "${EXPORTED_IPAS[0]}" "$OUTPUT_IPA"
+IPA_SIZE="$(du -h "$OUTPUT_IPA" | cut -f1)"
+
 echo ""
 echo "Done: $OUTPUT_IPA ($IPA_SIZE)"
-echo ""
-echo "Install with Xcode, Apple Configurator, or another sideloading tool that you trust."
+echo "The IPA came from an Xcode archive/export flow and retains its embedded"
+echo "frameworks, provisioning profile, entitlements, resources, and signature."

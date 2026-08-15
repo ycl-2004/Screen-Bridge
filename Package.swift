@@ -30,6 +30,11 @@ let package = Package(
             publicHeadersPath: ".",
             cSettings: [
                 .headerSearchPath(".")
+            ],
+            linkerSettings: [
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("IOSurface")
             ]
         ),
         .executableTarget(
@@ -42,6 +47,8 @@ let package = Package(
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("Network"),
                 .linkedFramework("CoreGraphics"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("IOSurface"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreAudio")
             ]

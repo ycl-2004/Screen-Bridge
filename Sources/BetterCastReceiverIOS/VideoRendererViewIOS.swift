@@ -4,7 +4,8 @@ import AVFoundation
 
 // Just a protocol to match what NetworkListenerIOS expects
 protocol VideoRendererIOS: AnyObject {
-    func enqueue(_ sampleBuffer: CMSampleBuffer)
+    @discardableResult
+    func enqueue(_ sampleBuffer: CMSampleBuffer) -> Bool
 }
 
 class VideoRendererViewIOS: UIView, VideoRendererIOS {
@@ -40,7 +41,8 @@ class VideoRendererViewIOS: UIView, VideoRendererIOS {
         }
     }
     
-    func enqueue(_ sampleBuffer: CMSampleBuffer) {
+    @discardableResult
+    func enqueue(_ sampleBuffer: CMSampleBuffer) -> Bool {
         if videoLayer.status == .failed {
             LogManager.shared.log("VideoRenderer: Layer failed, flushing")
             videoLayer.flush()
@@ -52,6 +54,7 @@ class VideoRendererViewIOS: UIView, VideoRendererIOS {
         }
 
         videoLayer.enqueue(sampleBuffer)
+        return videoLayer.status != .failed
     }
 
     /// Remove the last decoded frame so a disconnected session never lingers

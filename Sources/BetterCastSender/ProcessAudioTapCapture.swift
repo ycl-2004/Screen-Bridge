@@ -47,6 +47,9 @@ final class ProcessAudioTapCapture {
     private var ioProcID: AudioDeviceIOProcID?
     private var streamFormat = AudioStreamBasicDescription()
     private var isRunning = false
+    private var capturedProcessIDs: Set<AudioObjectID> = []
+    private var observedReplacementProcessIDs: Set<AudioObjectID>?
+    private var replacementObservationCount = 0
 
     init(bundleIDPrefixes: [String], muteProcess: Bool, audioHandler: @escaping AudioHandler) {
         self.bundleIDPrefixes = bundleIDPrefixes
@@ -86,6 +89,9 @@ final class ProcessAudioTapCapture {
             aggregateDeviceID = try Self.createAggregateDevice(for: tapDescription)
             try createAndStartIOProc()
             isRunning = true
+            capturedProcessIDs = Set(processIDs)
+            observedReplacementProcessIDs = nil
+            replacementObservationCount = 0
 
             LogManager.shared.log("ProcessAudioTap: Started muted capture for \(processIDs.count) Chrome audio process(es)")
         } catch {
@@ -112,6 +118,43 @@ final class ProcessAudioTapCapture {
         }
 
         isRunning = false
+        capturedProcessIDs.removeAll()
+        observedReplacementProcessIDs = nil
+        replacementObservationCount = 0
+    }
+
+    /// A process tap captures the concrete Core Audio process objects supplied
+    /// when it is created. Chrome replaces those objects as renderer processes
+    /// start, stop, or restart, so a long-lived tap must be rebuilt when the
+    /// matching process set changes.
+    ///
+    /// Require the same replacement set twice before rebuilding. This avoids
+    /// interrupting audio for a one-poll process transition while Chrome is
+    /// creating a renderer.
+    func requiresRebuildForCurrentProcesses() -> Bool {
+        guard isRunning else { return false }
+
+        let currentProcessIDs: Set<AudioObjectID>
+        do {
+            currentProcessIDs = Set(try Self.audioProcessIDs(matchingBundleIDPrefixes: bundleIDPrefixes))
+        } catch {
+            return false
+        }
+
+        guard currentProcessIDs != capturedProcessIDs else {
+            observedReplacementProcessIDs = nil
+            replacementObservationCount = 0
+            return false
+        }
+
+        if observedReplacementProcessIDs == currentProcessIDs {
+            replacementObservationCount += 1
+        } else {
+            observedReplacementProcessIDs = currentProcessIDs
+            replacementObservationCount = 1
+        }
+
+        return replacementObservationCount >= 2
     }
 
     private func createAndStartIOProc() throws {

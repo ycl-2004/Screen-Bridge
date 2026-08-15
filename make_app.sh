@@ -5,9 +5,29 @@ set -e
 
 VERSION="v8"
 
-# Code signing identity. Defaults to ad-hoc signing for local builds.
-# Set this to your Developer ID Application certificate for distribution.
-SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+# A stable Apple-issued signature is required for a distributable build. An
+# ad-hoc identity can change how macOS tracks Local Network permission between
+# builds, so it is available only through an explicit local-testing opt-in.
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+ALLOW_AD_HOC="${ALLOW_AD_HOC:-0}"
+
+if [ -z "$SIGN_IDENTITY" ]; then
+    if [ "$ALLOW_AD_HOC" = "1" ]; then
+        SIGN_IDENTITY="-"
+    else
+        echo "ERROR: SIGN_IDENTITY is required."
+        echo "Use an Apple-issued identity, for example:"
+        echo "  SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./make_app.sh"
+        echo "For disposable local testing only, explicitly opt in:"
+        echo "  ALLOW_AD_HOC=1 ./make_app.sh"
+        exit 2
+    fi
+fi
+
+if [ "$SIGN_IDENTITY" = "-" ] && [ "$ALLOW_AD_HOC" != "1" ]; then
+    echo "ERROR: ad-hoc signing requires ALLOW_AD_HOC=1."
+    exit 2
+fi
 
 # Apple notarization settings. Leave empty for local ad-hoc builds.
 APPLE_ID="${APPLE_ID:-}"
@@ -17,6 +37,10 @@ TEAM_ID="${TEAM_ID:-}"
 echo "============================================"
 echo "  Building YC Cast $VERSION (Universal Binary)"
 echo "============================================"
+if [ "$SIGN_IDENTITY" = "-" ]; then
+    echo "WARNING: creating an ad-hoc signed local-test build."
+    echo "Do not publish it; macOS Local Network permission identity may not remain stable."
+fi
 swift build -c release --arch arm64 --arch x86_64
 
 # Define Paths
@@ -41,6 +65,7 @@ cp "assets/branding/BetterCastIcon.icns" "$APP_NAME/Contents/Resources/AppIcon.i
 
 # Code sign with entitlements
 codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" --entitlements "BetterCastSender-Release.entitlements" "$APP_NAME"
+codesign --verify --deep --strict "$APP_NAME"
 
 # ============================================
 # Create DMG
@@ -64,6 +89,7 @@ rm -rf "$DMG_STAGING"
 # Sign the DMG itself (required for Gatekeeper to accept it)
 echo "Signing DMG..."
 codesign --force --sign "$SIGN_IDENTITY" "$DMG_NAME"
+codesign --verify --strict "$DMG_NAME"
 
 # ============================================
 # Notarize DMG (if Apple ID is set)
