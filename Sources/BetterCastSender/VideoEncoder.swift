@@ -13,6 +13,15 @@ class VideoEncoder {
     private var frameCount = 0
     private let bitrate: Int
 
+    /// Guards the session against use after teardown.
+    ///
+    /// The VideoToolbox callback is registered with `passUnretained(self)`, so a
+    /// session that outlives this object would call back into freed memory.
+    /// `invalidate()` drains and tears the session down before that can happen,
+    /// and `deinit` is the backstop for callers that forget.
+    private let sessionLock = NSLock()
+    private var isInvalidated = false
+
     // Cache for headers so we can re-send them if needed
     private var cachedSPS: Data?
     private var cachedPPS: Data?
@@ -56,6 +65,16 @@ class VideoEncoder {
         // Configuration for Low-Latency Real-Time Encoding
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+
+        // CABAC costs a little encode time and buys roughly 10% bitrate at equal
+        // quality versus CAVLC. On screen content — text, thin UI lines, large flat
+        // areas — that budget goes straight into sharper edges.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC)
+
+        // Emit each frame as soon as it is encoded. Anything above 0 trades
+        // latency for compression efficiency, which is the wrong trade for a
+        // screen the user is actively working on.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         
         let bitrateCF = bitrate as CFNumber
         // DataRateLimits uses BYTES per period. Shorter windows = tighter per-frame control.
@@ -77,13 +96,46 @@ class VideoEncoder {
         LogManager.shared.log("VideoEncoder: Initialized (\(bitrate/1_000_000)Mbps, KF every \(keyframeIntervalSeconds)s)")
     }
     
+    deinit {
+        invalidate()
+        LogManager.shared.log("VideoEncoder: Deallocated")
+    }
+
+    /// Drains in-flight frames and tears the compression session down.
+    ///
+    /// Idempotent and safe to call from any thread. After this returns,
+    /// VideoToolbox will not deliver further callbacks for this encoder, which is
+    /// what makes the unretained callback reference safe.
+    func invalidate() {
+        sessionLock.lock()
+        if isInvalidated {
+            sessionLock.unlock()
+            return
+        }
+        isInvalidated = true
+        let session = compressionSession
+        compressionSession = nil
+        sessionLock.unlock()
+
+        guard let session else { return }
+        // Order matters: finish outstanding frames first, otherwise their
+        // callbacks fire against a session that is already being invalidated.
+        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        VTCompressionSessionInvalidate(session)
+        delegate = nil
+    }
+
     func forceKeyframe() {
         LogManager.shared.log("VideoEncoder: Keyframe Requested")
         pendingKeyFrameRequest = true
     }
-    
+
     func encode(sampleBuffer: CMSampleBuffer) {
-        guard let session = compressionSession,
+        sessionLock.lock()
+        let session = compressionSession
+        sessionLock.unlock()
+
+        guard let session,
               let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         let presentationTimestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)

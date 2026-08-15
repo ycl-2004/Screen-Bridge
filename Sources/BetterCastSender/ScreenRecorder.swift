@@ -16,6 +16,13 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     weak var delegate: ScreenRecorderDelegate?
     private var isStoppingIntentionally = false
 
+    /// `startCapture()` can still be in flight when a stop arrives — the retry
+    /// loop alone allows up to two seconds. `stream` is only assigned once start
+    /// succeeds, so a stop in that window used to see `nil`, do nothing, and
+    /// leave the capture that started afterwards running with nobody holding it.
+    private let stateLock = NSLock()
+    private var isStopRequested = false
+
     private var width: Int
     private var height: Int
     private var captureFPS: Int32
@@ -66,7 +73,17 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             
             guard let display = display else {
-                LogManager.shared.log("ScreenRecorder: No display found")
+                // Previously this returned silently, so the pipeline sat there
+                // believing capture was starting.
+                let reason = "No display was available to capture"
+                LogManager.shared.log("ScreenRecorder: \(reason)")
+                delegate?.screenRecorderDidFailToStart(self, reason: reason)
+                return
+            }
+
+            let alreadyStopped = stateLock.withLock { isStopRequested }
+            if alreadyStopped {
+                LogManager.shared.log("ScreenRecorder: Stop requested before capture started — not starting")
                 return
             }
             
@@ -81,6 +98,24 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             config.sampleRate = Int(BCConstants.audioSampleRate)
             config.channelCount = Int(BCConstants.audioChannels)
 
+            // Ask for the sharpest source ScreenCaptureKit can give us. Left at
+            // `.automatic` it may hand back a downscaled surface on a HiDPI
+            // display, which is exactly the detail this pipeline is trying to
+            // preserve.
+            config.captureResolution = .best
+
+            // Pin the colour space. Without this the captured surface can be
+            // tagged differently from what the receiver assumes, which shows up
+            // as washed-out or oversaturated colour after the H.264 round trip.
+            config.colorSpaceName = CGColorSpace.sRGB
+
+            // The capture size is chosen to match the virtual display's backing
+            // store exactly, so nothing should be rescaled on the way out.
+            config.scalesToFit = false
+
+            // This is a real extended display — the pointer belongs on it.
+            config.showsCursor = true
+
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .global(qos: .userInitiated))
             if captureAudio {
@@ -89,7 +124,20 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             
             try await stream.startCapture()
-            self.stream = stream
+
+            // A stop can land between the availability check above and here.
+            let stoppedDuringStart = stateLock.withLock { () -> Bool in
+                if isStopRequested { return true }
+                self.stream = stream
+                return false
+            }
+
+            if stoppedDuringStart {
+                try? await stream.stopCapture()
+                LogManager.shared.log("ScreenRecorder: Discarded capture that finished starting after stop was requested")
+                return
+            }
+
             LogManager.shared.log("ScreenRecorder: Started capture for display \(display.displayID)")
 
         } catch {
@@ -103,11 +151,18 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     
     func stopCapture() {
-        isStoppingIntentionally = true
-        Task {
-            try? await stream?.stopCapture()
+        let current = stateLock.withLock { () -> SCStream? in
+            isStopRequested = true
+            isStoppingIntentionally = true
+            let existing = stream
             stream = nil
-            isStoppingIntentionally = false
+            return existing
+        }
+
+        guard let current else { return }
+        Task {
+            try? await current.stopCapture()
+            stateLock.withLock { isStoppingIntentionally = false }
         }
     }
     
@@ -129,6 +184,10 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                 LogManager.shared.log("ScreenRecorder: Audio frame \(audioFrameCount)")
             }
             audioEncoder?.encode(sampleBuffer: sampleBuffer)
+
+        case .microphone:
+            // Never requested. YC Cast routes selected app audio, not the mic.
+            break
 
         @unknown default:
             break

@@ -55,6 +55,14 @@ class NetworkListenerIOS {
     // so prolonged silence means the connection died without a clean close
     // (Mac force quit, power loss, network drop).
     private var lastDataReceived = Date()
+
+    /// Liveness of the *video* stream specifically.
+    ///
+    /// The watchdog used to look only at `lastDataReceived`, which any body
+    /// updates — including audio frames arriving on the second connection. So a
+    /// frozen picture with healthy audio never tripped it: the iPad sat on a
+    /// stale frame still reporting "Connected".
+    private var lastVideoReceived = Date()
     private let streamSilenceTimeout: TimeInterval = 8.0
     private var pendingLossNotification = false
 
@@ -92,6 +100,7 @@ class NetworkListenerIOS {
     /// the watchdog doesn't count suspended time as stream silence.
     func noteForegroundResumed() {
         lastDataReceived = Date()
+        lastVideoReceived = Date()
     }
 
     private func startPrivateP2P() {
@@ -273,7 +282,19 @@ class NetworkListenerIOS {
         }
     }
     
+    /// A peer that connects but never completes pairing must not be able to sit
+    /// there indefinitely, nor to accumulate half-open sessions.
+    private static let handshakeTimeout: TimeInterval = 10
+    private static let maxPendingHandshakes = 4
+    private var pendingHandshakes = 0
+
     private func handleNewConnection(_ connection: NWConnection, type: String) {
+        if pendingHandshakes >= Self.maxPendingHandshakes {
+            LogManager.shared.log("ReceiverIOS: Refusing \(type) connection — \(pendingHandshakes) handshakes already pending")
+            connection.cancel()
+            return
+        }
+
         connection.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
             switch state {
@@ -281,8 +302,25 @@ class NetworkListenerIOS {
                 LogManager.shared.log("ReceiverIOS: \(type) Connection ready")
                 self.notifyState(.connecting, "Authenticating...")
 
+                self.pendingHandshakes += 1
+                var settled = false
+                let settle: () -> Bool = {
+                    if settled { return false }
+                    settled = true
+                    self.pendingHandshakes = max(0, self.pendingHandshakes - 1)
+                    return true
+                }
+
+                self.networkQueue.asyncAfter(deadline: .now() + Self.handshakeTimeout) {
+                    guard settle() else { return }
+                    LogManager.shared.log("ReceiverIOS: Pairing timed out after \(Int(Self.handshakeTimeout))s — closing connection")
+                    self.notifyState(.waiting, "Pairing timed out")
+                    connection.cancel()
+                }
+
                 self.performPairingHandshake(on: connection) { [weak self] result in
                     guard let self = self else { return }
+                    guard settle() else { return }
                     switch result {
                     case .success(let sessionKey):
                         let connectionId = ObjectIdentifier(connection)
@@ -293,6 +331,7 @@ class NetworkListenerIOS {
                         }
 
                         self.lastDataReceived = Date()
+                        self.lastVideoReceived = Date()
                         self.notifyState(.connected, "Connected")
 
                         if type == "UDP" {
@@ -328,6 +367,10 @@ class NetworkListenerIOS {
 
         if wasConnected && connectedClients.isEmpty {
             audioPlayer?.stop()
+            // Start the next session from a clean decoder. Reusing the previous
+            // session's SPS/PPS and decompression session showed artifacts until
+            // the next GOP after every reconnect.
+            videoDecoder?.reset()
             if pendingLossNotification {
                 pendingLossNotification = false
                 notifyState(.connectionLost, "Connection lost")
@@ -378,9 +421,11 @@ class NetworkListenerIOS {
                 return
             }
 
-            let length = content.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            let bodyLength = Int(length)
-            guard bodyLength > 0 && bodyLength <= 64 * 1024 else {
+            let rawLength = content.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+            let bodyLength: Int
+            do {
+                bodyLength = try StreamFraming.validateBodyLength(rawLength, limit: StreamFraming.maxHandshakeFrameBytes)
+            } catch {
                 completion(.failure(PairingAuthError.invalidEnvelope))
                 return
             }
@@ -496,8 +541,19 @@ class NetworkListenerIOS {
             }
 
             if let content = content, content.count == 4 {
-                let length = content.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-                let bodyLength = Int(length)
+                let rawLength = content.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+
+                // The sender is authenticated, but the length it sends is still
+                // untrusted input: an unbounded value here asked the socket for up
+                // to ~4 GiB and stalled the receiver under memory pressure.
+                let bodyLength: Int
+                do {
+                    bodyLength = try StreamFraming.validateBodyLength(rawLength, limit: StreamFraming.maxMediaFrameBytes)
+                } catch {
+                    LogManager.shared.log("ReceiverIOS (TCP): Rejected frame length \(rawLength) (\(error)) — closing connection")
+                    self?.removeConnection(connection)
+                    return
+                }
 
                 connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { body, bodyContext, isComplete, error in
                     if let error = error {
@@ -506,10 +562,16 @@ class NetworkListenerIOS {
                         return
                     }
 
-                    if let body = body, !body.isEmpty {
+                    if let body = body, body.count == bodyLength {
                         self?.handleReceivedBody(body, connection: connection)
                         self?.receiveTCP(on: connection)
-                    } else if isComplete {
+                    } else if isComplete || body != nil {
+                        // A body shorter than its header promised means the stream
+                        // ended mid-frame; decoding it would feed the decoder a
+                        // partial access unit.
+                        if let body, body.count != bodyLength {
+                            LogManager.shared.log("ReceiverIOS (TCP): Frame truncated (expected \(bodyLength), got \(body.count))")
+                        }
                         self?.removeConnection(connection)
                     } else {
                         self?.receiveTCP(on: connection)
@@ -543,6 +605,7 @@ class NetworkListenerIOS {
             // Type-byte framing: [0x01=video | 0x02=audio][payload]
             let payload = body.dropFirst(1)
             if firstByte == 0x01 {
+                lastVideoReceived = Date()
                 videoDecoder?.decode(data: payload)
             } else if firstByte == 0x02 {
                 audioPlayer?.decode(aacData: payload)
@@ -552,6 +615,7 @@ class NetworkListenerIOS {
             }
         } else {
             // Legacy framing: raw video data (with 8-byte PTS prefix handled by decoder)
+            lastVideoReceived = Date()
             videoDecoder?.decode(data: body)
         }
     }
@@ -683,9 +747,11 @@ class NetworkListenerIOS {
         // Backgrounded: the sender pauses the stream during its grace period,
         // so silence is expected. The clock is reset on foreground return.
         guard UIApplication.shared.applicationState == .active else { return }
-        guard Date().timeIntervalSince(lastDataReceived) > streamSilenceTimeout else { return }
+        // Judge on video liveness, not on "any bytes arrived". Audio keeps
+        // flowing on its own connection while the picture is frozen.
+        guard Date().timeIntervalSince(lastVideoReceived) > streamSilenceTimeout else { return }
 
-        LogManager.shared.log("ReceiverIOS: No data for \(Int(streamSilenceTimeout))s — declaring connection lost")
+        LogManager.shared.log("ReceiverIOS: No video for \(Int(streamSilenceTimeout))s — declaring connection lost")
         pendingLossNotification = true
         let stale = connectedClients
         networkQueue.async {
@@ -695,6 +761,7 @@ class NetworkListenerIOS {
         }
         // Reset so we don't re-trigger every tick while cancels propagate.
         lastDataReceived = Date()
+        lastVideoReceived = Date()
     }
 
     /// Request a keyframe (command 999) from the sender, throttled to one request

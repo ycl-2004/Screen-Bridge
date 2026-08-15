@@ -2,6 +2,7 @@
 import Foundation
 import VideoToolbox
 import CoreMedia
+import BetterCastShared
 
 protocol VideoDecoderDelegate: AnyObject {
     func didDecode(sampleBuffer: CMSampleBuffer)
@@ -36,45 +37,45 @@ class VideoDecoder {
     private var timeOffset: Double = 0
     
     func decode(data: Data) {
-        // Expected format: [PTS: 8 bytes][NALUs...]
-        guard data.count > 8 else { return }
-        
-        let ptsData = data.prefix(8)
-        
-        var ptsNanos: UInt64 = 0
-        let _ = Swift.withUnsafeMutableBytes(of: &ptsNanos) { ptr in
-            ptsData.copyBytes(to: ptr)
+        // Expected format: [PTS: 8 bytes][AVCC NALUs...]
+        guard let payload = StreamFraming.splitVideoPayload(data) else { return }
+
+        // Parsing is validated up front rather than inline. The previous scanner
+        // read the NALU header byte after only checking
+        // `offset + 4 + naluLen > totalLen`, which passes for a zero-length NALU
+        // at the end of the buffer and traps on the read.
+        let parsed = AVCCParser.parse(payload.accessUnit)
+        guard !parsed.isMalformed else {
+            LogManager.shared.log("VideoDecoder: Dropped malformed access unit (\(payload.accessUnit.count) bytes)")
+            // Ask for a fresh keyframe rather than feeding VideoToolbox garbage.
+            delegate?.didFailToDecodeFrame(status: kVTVideoDecoderBadDataErr)
+            return
         }
-        
-        let videoData = Data(data.dropFirst(8))
-        
-        // Scan for SPS/PPS
-        var offset = 0
-        let totalLen = videoData.count
-        
-        while offset + 4 <= totalLen {
-            let lenBuf = videoData.subdata(in: offset..<offset+4)
-            let naluLen = Int(UInt32(bigEndian: lenBuf.withUnsafeBytes { $0.load(as: UInt32.self) }))
-            
-            if offset + 4 + naluLen > totalLen { break }
-            
-            let naluHeader = videoData[offset + 4]
-            let naluType = naluHeader & 0x1F
-            
-            if naluType == 7 { // SPS
-                sps = videoData.subdata(in: offset+4 ..< offset+4+naluLen)
-            } else if naluType == 8 { // PPS
-                pps = videoData.subdata(in: offset+4 ..< offset+4+naluLen)
-            }
-            
-            offset += 4 + naluLen
-        }
-        
+
+        if let newSPS = parsed.sps { sps = newSPS }
+        if let newPPS = parsed.pps { pps = newPPS }
+
         createDecompressionSessionIfReady()
-        
+
         if decompressionSession != nil {
-            decodeFrame(data: videoData, ptsNanos: ptsNanos)
+            decodeFrame(data: payload.accessUnit, ptsNanos: payload.presentationTimeNanos)
         }
+    }
+
+    /// Drops the decoder state so a new session starts from a fresh keyframe.
+    ///
+    /// Without this, reconnecting reused SPS/PPS and the decompression session
+    /// from the previous session, which produced artifacts until the next GOP.
+    func reset() {
+        if let session = decompressionSession {
+            VTDecompressionSessionInvalidate(session)
+        }
+        decompressionSession = nil
+        formatDescription = nil
+        sps = nil
+        pps = nil
+        timeOffset = 0
+        LogManager.shared.log("VideoDecoder: Reset for new session")
     }
     
     private func createDecompressionSessionIfReady() {

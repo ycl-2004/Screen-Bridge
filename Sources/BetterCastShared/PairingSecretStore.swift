@@ -9,6 +9,8 @@ public protocol PairingSecretStoring {
 
 public enum PairingSecretStoreError: Error, Equatable {
     case unhandledStatus(OSStatus)
+    /// Refused before touching the Keychain, so any stored secret survives.
+    case emptySecret
 }
 
 public final class KeychainPairingSecretStore: PairingSecretStoring {
@@ -37,16 +39,31 @@ public final class KeychainPairingSecretStore: PairingSecretStoring {
         return item as? Data
     }
 
+    /// Stores the pairing secret, replacing any existing one.
+    ///
+    /// This updates in place rather than delete-then-add: the old sequence lost
+    /// the stored secret whenever the add half failed, leaving the device
+    /// silently unpaired with no way to recover the previous value.
     public func saveSecret(_ secret: Data) throws {
-        try deleteSecret()
+        guard !secret.isEmpty else { throw PairingSecretStoreError.emptySecret }
 
-        var query = baseQuery()
-        query[kSecValueData as String] = secret
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let attributes: [String: Any] = [
+            kSecValueData as String: secret,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
 
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw PairingSecretStoreError.unhandledStatus(status)
+        let updateStatus = SecItemUpdate(baseQuery() as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess { return }
+        guard updateStatus == errSecItemNotFound else {
+            throw PairingSecretStoreError.unhandledStatus(updateStatus)
+        }
+
+        var addQuery = baseQuery()
+        addQuery.merge(attributes) { _, new in new }
+
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw PairingSecretStoreError.unhandledStatus(addStatus)
         }
     }
 

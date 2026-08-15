@@ -75,14 +75,60 @@ public struct PairingAuthenticator {
         return Data((0..<nonceLength).map { _ in UInt8.random(in: 0...UInt8.max) })
     }
 
+    /// Shortest accepted pairing code, counted after normalization.
+    public static let minimumSecretLength = 6
+
+    /// Alphabet for generated codes: no `0/O` or `1/l/I`, so a code read off one
+    /// screen and typed into another is unambiguous.
+    private static let codeAlphabet = Array("abcdefghjkmnpqrstuvwxyz23456789")
+
     public static func normalizedSecret(from userInput: String) -> Data {
-        let normalized = userInput
+        let digest = SHA256.hash(data: Data(normalize(userInput).utf8))
+        return Data(digest)
+    }
+
+    /// Strips the separators a user might type, so `"YC-Cast 2026"` and
+    /// `"yccast2026"` are the same secret on both devices.
+    public static func normalize(_ userInput: String) -> String {
+        userInput
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
             .filter { !$0.isWhitespace && $0 != "-" }
+    }
 
-        let digest = SHA256.hash(data: Data(normalized.utf8))
-        return Data(digest)
+    /// Whether a pairing code is strong enough to be used as a shared secret.
+    ///
+    /// Normalization removes whitespace and `-`, so inputs the UI treated as
+    /// non-empty (`"-"`, `"---"`) previously collapsed to `SHA256("")` — the same
+    /// fixed secret on every install that did it. Callers must gate on this
+    /// before storing a secret.
+    public static func isAcceptableSecretInput(_ userInput: String) -> Bool {
+        let normalized = normalize(userInput)
+        guard normalized.count >= minimumSecretLength else { return false }
+        // A code made of one repeated character has length but no entropy.
+        guard Set(normalized).count >= 2 else { return false }
+        return true
+    }
+
+    /// Generates a pairing code that satisfies `isAcceptableSecretInput`.
+    public static func generatePairingCode(groups: Int = 3, groupLength: Int = 4) -> String {
+        let chunks = (0..<groups).map { _ in
+            String((0..<groupLength).map { _ in randomAlphabetCharacter() })
+        }
+        let code = chunks.joined(separator: "-")
+        // Astronomically unlikely, but never hand back a code our own rule rejects.
+        return isAcceptableSecretInput(code) ? code : generatePairingCode(groups: groups, groupLength: groupLength)
+    }
+
+    private static func randomAlphabetCharacter() -> Character {
+        var byte: UInt8 = 0
+        let status = withUnsafeMutablePointer(to: &byte) { pointer in
+            SecRandomCopyBytes(kSecRandomDefault, 1, pointer)
+        }
+        let index = status == errSecSuccess
+            ? Int(byte) % codeAlphabet.count
+            : Int.random(in: 0..<codeAlphabet.count)
+        return codeAlphabet[index]
     }
 
     public static func receiverProof(secret: Data, senderNonce: Data, receiverNonce: Data) -> Data {

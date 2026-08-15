@@ -1,0 +1,149 @@
+import Foundation
+
+public enum StreamFramingError: Error, Equatable {
+    /// A peer declared a zero-length body. Nothing on the wire is legitimately empty.
+    case emptyFrame
+    /// A peer declared a body larger than the protocol allows for this channel.
+    case frameTooLarge
+    /// The connection ended before the declared body arrived in full.
+    case truncatedFrame
+}
+
+/// Bounds for the length-prefixed wire protocol.
+///
+/// Every frame is `[UInt32 big-endian body length][body]`. The length comes from
+/// the peer, so it is untrusted input even after pairing succeeds: a buggy or
+/// hostile paired device must not be able to make the other side allocate an
+/// arbitrary buffer or block forever waiting for bytes that never arrive.
+///
+/// Limits are per channel so a control message can never request a video-sized read.
+public enum StreamFraming {
+
+    /// Handshake messages are small JSON blobs (nonces and proofs).
+    public static let maxHandshakeFrameBytes = 64 * 1024
+
+    /// Control messages are authenticated envelopes wrapping a small event.
+    public static let maxControlFrameBytes = 64 * 1024
+
+    /// One AAC access unit plus envelope overhead.
+    public static let maxAudioFrameBytes = 1 * 1024 * 1024
+
+    /// One coalesced H.264 access unit. A 4K keyframe at high bitrate stays far
+    /// below this; the limit exists to bound the worst case, not to shape traffic.
+    public static let maxVideoFrameBytes = 16 * 1024 * 1024
+
+    /// Used where video and audio share a connection and the type is not yet known.
+    public static var maxMediaFrameBytes: Int { maxVideoFrameBytes }
+
+    /// Validates a peer-supplied body length against a channel limit.
+    public static func validateBodyLength(_ raw: UInt32, limit: Int) throws -> Int {
+        guard raw > 0 else { throw StreamFramingError.emptyFrame }
+        guard raw <= UInt32(clamping: limit) else { throw StreamFramingError.frameTooLarge }
+        return Int(raw)
+    }
+
+    /// Reads the big-endian body length from a 4-byte header.
+    public static func bodyLength(fromHeader header: Data) -> UInt32? {
+        guard header.count >= 4 else { return nil }
+        return header.withUnsafeBytes { raw -> UInt32 in
+            UInt32(bigEndian: raw.loadUnaligned(as: UInt32.self))
+        }
+    }
+
+    /// Splits a video payload of `[PTS: 8 bytes native-endian][AVCC NALUs...]`.
+    ///
+    /// The byte order matches what `VideoEncoder` writes; it is deliberately not
+    /// normalised here so existing receivers stay compatible.
+    public static func splitVideoPayload(_ data: Data) -> (presentationTimeNanos: UInt64, accessUnit: Data)? {
+        guard data.count > 8 else { return nil }
+        let pts = data.withUnsafeBytes { raw -> UInt64 in
+            raw.loadUnaligned(as: UInt64.self)
+        }
+        return (pts, Data(data.dropFirst(8)))
+    }
+}
+
+/// Outcome of parsing one AVCC access unit.
+public struct AVCCParseResult: Equatable {
+    public let sps: Data?
+    public let pps: Data?
+    public let containsKeyframe: Bool
+    public let isMalformed: Bool
+
+    public init(sps: Data?, pps: Data?, containsKeyframe: Bool, isMalformed: Bool) {
+        self.sps = sps
+        self.pps = pps
+        self.containsKeyframe = containsKeyframe
+        self.isMalformed = isMalformed
+    }
+}
+
+/// Parser for length-prefixed (AVCC) H.264 access units.
+///
+/// The previous inline scanner checked `offset + 4 + naluLen > totalLen` before
+/// reading the NALU header byte. With `naluLen == 0` that check passes at the end
+/// of the buffer and `data[offset + 4]` traps. This parser requires every NALU to
+/// carry at least its 1-byte header and requires the buffer to be consumed exactly.
+public enum AVCCParser {
+
+    private static let lengthPrefixSize = 4
+
+    public static func parse(_ data: Data) -> AVCCParseResult {
+        guard !data.isEmpty else { return malformed() }
+
+        var sps: Data?
+        var pps: Data?
+        var containsKeyframe = false
+
+        let result: AVCCParseResult? = data.withUnsafeBytes { raw -> AVCCParseResult? in
+            let total = raw.count
+            var offset = 0
+
+            while offset < total {
+                // Need a full length prefix.
+                guard total - offset >= lengthPrefixSize else { return malformed() }
+
+                let declared = UInt32(
+                    bigEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
+                )
+
+                // A NALU always carries at least its header byte.
+                guard declared >= 1 else { return malformed() }
+
+                let remaining = total - offset - lengthPrefixSize
+                guard Int(declared) <= remaining else { return malformed() }
+
+                let naluStart = offset + lengthPrefixSize
+                let naluType = raw[naluStart] & 0x1F
+
+                switch naluType {
+                case 5:
+                    containsKeyframe = true
+                case 7 where sps == nil:
+                    sps = Data(bytes: raw.baseAddress!.advanced(by: naluStart), count: Int(declared))
+                case 8 where pps == nil:
+                    pps = Data(bytes: raw.baseAddress!.advanced(by: naluStart), count: Int(declared))
+                default:
+                    break
+                }
+
+                offset = naluStart + Int(declared)
+            }
+
+            return nil // consumed exactly; fall through to the success result
+        }
+
+        if let malformedResult = result { return malformedResult }
+
+        return AVCCParseResult(
+            sps: sps,
+            pps: pps,
+            containsKeyframe: containsKeyframe,
+            isMalformed: false
+        )
+    }
+
+    private static func malformed() -> AVCCParseResult {
+        AVCCParseResult(sps: nil, pps: nil, containsKeyframe: false, isMalformed: true)
+    }
+}

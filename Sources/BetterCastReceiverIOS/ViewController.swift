@@ -21,6 +21,10 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     private var isConnected = false
     private let pairingSecretStore: PairingSecretStoring = KeychainPairingSecretStore()
 
+    /// Kept so the onboarding column can move clear of the software keyboard.
+    private var onboardingCenterY: NSLayoutConstraint!
+    private static let settingsButtonHiddenKey = "settingsButtonHidden"
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
@@ -51,8 +55,10 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
         startListenerIfPaired()
 
-        // Prevent Sleep
-        UIApplication.shared.isIdleTimerDisabled = true
+        // Sleep is only prevented while actually showing a stream — see
+        // `updateIdleTimer`. Holding it from launch kept the iPad awake on the
+        // pairing screen and while merely waiting for a sender.
+        updateIdleTimer(isStreaming: false)
 
         // Listen for orientation changes to update sender's virtual display
         NotificationCenter.default.addObserver(self, selector: #selector(orientationChanged), name: UIDevice.orientationDidChangeNotification, object: nil)
@@ -64,6 +70,9 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         // are attributable, and resync on return.
         NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChangeFrame), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillHide), name: UIResponder.keyboardWillHideNotification, object: nil)
     }
 
     // Background grace: tell the sender we're backgrounding so it holds the
@@ -227,9 +236,11 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         deviceNameField.rightView = UIView(frame: CGRect(x: 0, y: 0, width: 12, height: 0))
         deviceNameField.rightViewMode = .always
         deviceNameField.returnKeyType = .done
+        // 0.25 white on near-black fell well below the contrast needed to read a
+        // hint you are being asked to act on.
         deviceNameField.attributedPlaceholder = NSAttributedString(
             string: "e.g. My iPad",
-            attributes: [.foregroundColor: UIColor.white.withAlphaComponent(0.25)]
+            attributes: [.foregroundColor: UIColor.white.withAlphaComponent(0.45)]
         )
         deviceNameField.addTarget(self, action: #selector(deviceNameChanged), for: .editingDidEnd)
         deviceNameField.addTarget(self, action: #selector(deviceNameReturnPressed), for: .editingDidEndOnExit)
@@ -283,8 +294,8 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             .paragraphStyle: paragraphStyle
         ]
 
-        instructions.append(NSAttributedString(string: "1. Install YC Cast on Mac\n", attributes: stepAttrs))
-        instructions.append(NSAttributedString(string: "Build and run the private Mac sender from this source tree to extend your display to this device.\n\n", attributes: bodyAttrs))
+        instructions.append(NSAttributedString(string: "1. Open YC Cast on your Mac\n", attributes: stepAttrs))
+        instructions.append(NSAttributedString(string: "The Mac app creates the extended display and streams it here.\n\n", attributes: bodyAttrs))
 
         instructions.append(NSAttributedString(string: "2. Connect to the same network\n", attributes: stepAttrs))
         instructions.append(NSAttributedString(string: "Make sure this device and your Mac are on the same Wi-Fi network.\n\n", attributes: bodyAttrs))
@@ -304,7 +315,10 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         pairingLabel.translatesAutoresizingMaskIntoConstraints = false
 
         pairingCodeField = UITextField()
-        pairingCodeField.placeholder = "Same code as your Mac"
+        pairingCodeField.attributedPlaceholder = NSAttributedString(
+            string: "Same code as your Mac",
+            attributes: [.foregroundColor: UIColor.white.withAlphaComponent(0.45)]
+        )
         pairingCodeField.textColor = .white
         pairingCodeField.font = .systemFont(ofSize: 16, weight: .medium)
         pairingCodeField.backgroundColor = UIColor.white.withAlphaComponent(0.08)
@@ -375,25 +389,29 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         contentView.addSubview(pairingContainer)
         contentView.addSubview(statusRow)
 
-        if #available(iOS 11.0, *) {
-            NSLayoutConstraint.activate([
-                contentView.centerYAnchor.constraint(equalTo: onboardingView.centerYAnchor, constant: -20),
-                contentView.leadingAnchor.constraint(equalTo: onboardingView.safeAreaLayoutGuide.leadingAnchor, constant: 40),
-                contentView.trailingAnchor.constraint(equalTo: onboardingView.safeAreaLayoutGuide.trailingAnchor, constant: -40),
-            ])
-        } else {
-            NSLayoutConstraint.activate([
-                contentView.centerYAnchor.constraint(equalTo: onboardingView.centerYAnchor, constant: -20),
-                contentView.leadingAnchor.constraint(equalTo: onboardingView.leadingAnchor, constant: 40),
-                contentView.trailingAnchor.constraint(equalTo: onboardingView.trailingAnchor, constant: -40),
-            ])
-        }
+        // The margins are minimums, not pins. Pinning both edges as required
+        // constraints fully determined the width, so the max-width cap below
+        // (previously .defaultHigh) was always the one broken — text ran the full
+        // width of the screen, which is ~950pt on a 13" iPad.
+        onboardingCenterY = contentView.centerYAnchor.constraint(equalTo: onboardingView.centerYAnchor, constant: -20)
+        NSLayoutConstraint.activate([
+            onboardingCenterY,
+            contentView.centerXAnchor.constraint(equalTo: onboardingView.centerXAnchor),
+            contentView.leadingAnchor.constraint(
+                greaterThanOrEqualTo: onboardingView.safeAreaLayoutGuide.leadingAnchor, constant: 40),
+            contentView.trailingAnchor.constraint(
+                lessThanOrEqualTo: onboardingView.safeAreaLayoutGuide.trailingAnchor, constant: -40),
+        ])
 
-        // Max width for readability on iPad
-        let maxWidth = contentView.widthAnchor.constraint(lessThanOrEqualToConstant: 400)
-        maxWidth.priority = .defaultHigh
+        // Cap the measure so body copy stays near a readable line length.
+        let maxWidth = contentView.widthAnchor.constraint(lessThanOrEqualToConstant: 420)
+        maxWidth.priority = .required
         maxWidth.isActive = true
-        contentView.centerXAnchor.constraint(equalTo: onboardingView.centerXAnchor).isActive = true
+
+        // Take the full 420 when there is room, shrink on narrow devices.
+        let preferredWidth = contentView.widthAnchor.constraint(equalToConstant: 420)
+        preferredWidth.priority = .defaultHigh
+        preferredWidth.isActive = true
 
         NSLayoutConstraint.activate([
             iconView.topAnchor.constraint(equalTo: contentView.topAnchor),
@@ -433,12 +451,13 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             pairingCodeField.topAnchor.constraint(equalTo: pairingLabel.bottomAnchor, constant: 6),
             pairingCodeField.leadingAnchor.constraint(equalTo: pairingContainer.leadingAnchor),
             pairingCodeField.trailingAnchor.constraint(equalTo: savePairingButton.leadingAnchor, constant: -8),
-            pairingCodeField.heightAnchor.constraint(equalToConstant: 40),
+            // 44pt is the minimum comfortable touch target.
+            pairingCodeField.heightAnchor.constraint(equalToConstant: 44),
 
             savePairingButton.trailingAnchor.constraint(equalTo: pairingContainer.trailingAnchor),
             savePairingButton.centerYAnchor.constraint(equalTo: pairingCodeField.centerYAnchor),
-            savePairingButton.widthAnchor.constraint(equalToConstant: 72),
-            savePairingButton.heightAnchor.constraint(equalToConstant: 40),
+            savePairingButton.widthAnchor.constraint(equalToConstant: 76),
+            savePairingButton.heightAnchor.constraint(equalToConstant: 44),
             pairingCodeField.bottomAnchor.constraint(equalTo: pairingContainer.bottomAnchor),
 
             statusRow.topAnchor.constraint(equalTo: pairingContainer.bottomAnchor, constant: 20),
@@ -467,6 +486,13 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     }
 
     private func startPulseAnimation() {
+        // An indefinitely repeating animation is exactly what Reduce Motion asks
+        // apps to drop.
+        guard !UIAccessibility.isReduceMotionEnabled else {
+            pulseView.layer.removeAllAnimations()
+            pulseView.alpha = 1.0
+            return
+        }
         UIView.animate(withDuration: 1.2, delay: 0, options: [.repeat, .autoreverse, .curveEaseInOut]) {
             self.pulseView.alpha = 0.2
         }
@@ -566,8 +592,20 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     }
 
     @objc private func savePairingCode() {
-        let code = pairingCodeField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !code.isEmpty else { return }
+        let code = pairingCodeField.text ?? ""
+
+        // Normalization strips whitespace and `-`, so inputs like "-" used to pass
+        // the old non-empty check and end up as SHA256("") — the same fixed secret
+        // on every install that did it.
+        guard PairingAuthenticator.isAcceptableSecretInput(code) else {
+            presentAlert(
+                title: "Pairing Code Too Weak",
+                message: "Use at least \(PairingAuthenticator.minimumSecretLength) letters or digits, and don't repeat a single character. Separators like spaces and dashes are ignored."
+            )
+            statusLabel.text = "Enter a longer pairing code"
+            pulseView.backgroundColor = UIColor.systemOrange
+            return
+        }
 
         do {
             let secret = PairingAuthenticator.normalizedSecret(from: code)
@@ -580,6 +618,56 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             statusLabel.text = "Pairing save failed"
             pulseView.backgroundColor = UIColor.systemOrange
             LogManager.shared.log("ViewController: Pairing save failed")
+            presentAlert(
+                title: "Couldn't Save Pairing Code",
+                message: "The keychain refused the write. Try again, and restart the app if it keeps failing."
+            )
+        }
+    }
+
+    // MARK: - Alerts
+
+    private func presentAlert(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: !UIAccessibility.isReduceMotionEnabled)
+    }
+
+    /// Confirms an action the user cannot undo.
+    private func confirm(
+        title: String,
+        message: String,
+        confirmTitle: String,
+        isDestructive: Bool,
+        action: @escaping () -> Void
+    ) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: confirmTitle, style: isDestructive ? .destructive : .default) { _ in
+            action()
+        })
+        present(alert, animated: !UIAccessibility.isReduceMotionEnabled)
+    }
+
+    @objc private func confirmClearPairingCode() {
+        confirm(
+            title: "Reset Pairing?",
+            message: "This iPad will stop accepting connections until you enter the pairing code again.",
+            confirmTitle: "Reset Pairing",
+            isDestructive: true
+        ) { [weak self] in
+            self?.clearPairingCode()
+        }
+    }
+
+    @objc private func confirmHideSettingsButton() {
+        confirm(
+            title: "Hide Settings Button?",
+            message: "To bring it back, tap the screen with three fingers.",
+            confirmTitle: "Hide",
+            isDestructive: false
+        ) { [weak self] in
+            self?.hideSettingsButton()
         }
     }
 
@@ -617,7 +705,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         // Blur background for the settings button
         let blurEffect = UIBlurEffect(style: .systemUltraThinMaterialDark)
         settingsButtonBlur = UIVisualEffectView(effect: blurEffect)
-        settingsButtonBlur.layer.cornerRadius = 20
+        settingsButtonBlur.layer.cornerRadius = 22
         settingsButtonBlur.clipsToBounds = true
         settingsButtonBlur.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(settingsButtonBlur)
@@ -625,7 +713,8 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         settingsButton = UIButton(type: .system)
         let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
         settingsButton.setImage(UIImage(systemName: "gearshape.fill", withConfiguration: config), for: .normal)
-        settingsButton.tintColor = UIColor.white.withAlphaComponent(0.7)
+        settingsButton.tintColor = UIColor.white.withAlphaComponent(0.9)
+        settingsButton.accessibilityLabel = "Settings"
         settingsButton.addTarget(self, action: #selector(settingsButtonTapped), for: .touchUpInside)
         settingsButton.translatesAutoresizingMaskIntoConstraints = false
         settingsButtonBlur.contentView.addSubview(settingsButton)
@@ -634,15 +723,15 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             NSLayoutConstraint.activate([
                 settingsButtonBlur.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
                 settingsButtonBlur.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -8),
-                settingsButtonBlur.widthAnchor.constraint(equalToConstant: 40),
-                settingsButtonBlur.heightAnchor.constraint(equalToConstant: 40),
+                settingsButtonBlur.widthAnchor.constraint(equalToConstant: 44),
+                settingsButtonBlur.heightAnchor.constraint(equalToConstant: 44),
             ])
         } else {
             NSLayoutConstraint.activate([
                 settingsButtonBlur.topAnchor.constraint(equalTo: view.topAnchor, constant: 28),
                 settingsButtonBlur.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-                settingsButtonBlur.widthAnchor.constraint(equalToConstant: 40),
-                settingsButtonBlur.heightAnchor.constraint(equalToConstant: 40),
+                settingsButtonBlur.widthAnchor.constraint(equalToConstant: 44),
+                settingsButtonBlur.heightAnchor.constraint(equalToConstant: 44),
             ])
         }
         NSLayoutConstraint.activate([
@@ -651,6 +740,44 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             settingsButton.leadingAnchor.constraint(equalTo: settingsButtonBlur.contentView.leadingAnchor),
             settingsButton.trailingAnchor.constraint(equalTo: settingsButtonBlur.contentView.trailingAnchor),
         ])
+
+        if UserDefaults.standard.bool(forKey: Self.settingsButtonHiddenKey) {
+            settingsButtonBlur.isHidden = true
+            settingsButtonBlur.alpha = 0
+        }
+    }
+
+    // MARK: - Keyboard
+
+    /// Lifts the onboarding column clear of the software keyboard.
+    ///
+    /// The column is vertically centred, so on iPad in landscape the keyboard
+    /// covered the pairing code field — the one control a first-time user has to
+    /// reach.
+    @objc private func keyboardWillChangeFrame(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let endFrame = (userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else {
+            return
+        }
+
+        let keyboardTop = view.convert(endFrame, from: nil).minY
+        let contentBottom = onboardingView.convert(pairingCodeField.frame, from: pairingCodeField.superview).maxY
+        let overlap = contentBottom + 24 - keyboardTop
+
+        let duration = (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+        onboardingCenterY.constant = overlap > 0 ? -20 - overlap : -20
+
+        UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : duration) {
+            self.onboardingView.layoutIfNeeded()
+        }
+    }
+
+    @objc private func keyboardWillHide(_ notification: Notification) {
+        onboardingCenterY.constant = -20
+        let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+        UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : duration) {
+            self.onboardingView.layoutIfNeeded()
+        }
     }
 
     @objc private func settingsButtonTapped() {
@@ -686,19 +813,22 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         let hideButtonButton = UIButton(type: .system)
         hideButtonButton.setTitle("Hide Settings Button", for: .normal)
         hideButtonButton.setTitleColor(.white, for: .normal)
-        hideButtonButton.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.5)
+        hideButtonButton.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.75)
         hideButtonButton.layer.cornerRadius = 10
         hideButtonButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
-        hideButtonButton.addTarget(self, action: #selector(hideSettingsButton), for: .touchUpInside)
+        // Hiding removes the only visible way back into this panel, so the user
+        // has to be told the recovery gesture before it happens.
+        hideButtonButton.addTarget(self, action: #selector(confirmHideSettingsButton), for: .touchUpInside)
         hideButtonButton.translatesAutoresizingMaskIntoConstraints = false
 
         let resetPairingButton = UIButton(type: .system)
-        resetPairingButton.setTitle("Reset Pairing", for: .normal)
+        resetPairingButton.setTitle("Reset Pairing…", for: .normal)
         resetPairingButton.setTitleColor(.white, for: .normal)
-        resetPairingButton.backgroundColor = UIColor.systemRed.withAlphaComponent(0.5)
+        resetPairingButton.backgroundColor = UIColor.systemRed.withAlphaComponent(0.75)
         resetPairingButton.layer.cornerRadius = 10
         resetPairingButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
-        resetPairingButton.addTarget(self, action: #selector(clearPairingCode), for: .touchUpInside)
+        // Confirm first: this deletes the stored secret and there is no undo.
+        resetPairingButton.addTarget(self, action: #selector(confirmClearPairingCode), for: .touchUpInside)
         resetPairingButton.translatesAutoresizingMaskIntoConstraints = false
 
         // Close button
@@ -728,6 +858,8 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             displayModeButton.heightAnchor.constraint(equalToConstant: 44),
             resetPairingButton.heightAnchor.constraint(equalToConstant: 44),
             hideButtonButton.heightAnchor.constraint(equalToConstant: 44),
+            // Close had only its intrinsic height (~20pt), below the touch target minimum.
+            closeButton.heightAnchor.constraint(equalToConstant: 44),
         ])
     }
 
@@ -742,6 +874,9 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     }
 
     @objc private func hideSettingsButton() {
+        // Persisted so the choice survives a relaunch. Previously the button
+        // silently came back, which made the setting look broken.
+        UserDefaults.standard.set(true, forKey: Self.settingsButtonHiddenKey)
         settingsOverlay.isHidden = true
         UIView.animate(withDuration: 0.3) {
             self.settingsButtonBlur.alpha = 0
@@ -751,6 +886,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     }
 
     @objc private func showSettingsButton() {
+        UserDefaults.standard.set(false, forKey: Self.settingsButtonHiddenKey)
         settingsButtonBlur.isHidden = false
         UIView.animate(withDuration: 0.3) {
             self.settingsButtonBlur.alpha = 1
@@ -793,8 +929,14 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     
     // MARK: - NetworkListenerDelegate
     
+    /// Keeps the screen awake only while a stream is actually on it.
+    private func updateIdleTimer(isStreaming: Bool) {
+        UIApplication.shared.isIdleTimerDisabled = isStreaming
+    }
+
     func networkListener(_ listener: NetworkListenerIOS, didUpdate state: ReceiverState, statusText: String) {
         statusLabel.text = statusText
+        updateIdleTimer(isStreaming: state == .connected)
 
         switch state {
         case .connected:

@@ -24,6 +24,18 @@ struct BetterCastSenderApp: App {
                 .background(Color(nsColor: .windowBackgroundColor))
             }
         }
+
+        // macOS expects preferences under the app menu at ⌘,. Without this scene
+        // the shortcut did nothing and the menu item was missing entirely; the
+        // settings were only reachable as a sidebar item in the main window.
+        Settings {
+            DetailPanelView(
+                client: networkClient,
+                selection: .constant(.settings),
+                hasCompletedOnboarding: $hasCompletedOnboarding
+            )
+            .frame(minWidth: 620, idealWidth: 660, minHeight: 520, idealHeight: 640)
+        }
     }
 
     enum SidebarSelection: Hashable {
@@ -357,10 +369,13 @@ struct OnboardingView: View {
 
     @State private var currentStep = 0
     @State private var screenRecordingGranted = false
-    @State private var accessibilityGranted = false
     @State private var pollTimer: Timer?
 
-    private let steps = ["Screen Recording", "Local Control", "Ready"]
+    /// Screen Recording is the only permission this app needs. There used to be a
+    /// "Local Control" step here, left over from a version that required
+    /// Accessibility: it was hardcoded as already granted, had no action, and the
+    /// poll timer skipped past it after 1.5s.
+    private let steps = ["Screen Recording", "Ready"]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -407,8 +422,6 @@ struct OnboardingView: View {
                 switch currentStep {
                 case 0:
                     screenRecordingStep
-                case 1:
-                    accessibilityStep
                 default:
                     readyStep
                 }
@@ -432,21 +445,28 @@ struct OnboardingView: View {
 
                 Spacer()
 
-                if currentStep < 2 {
-                    Button(stepCompleted(currentStep) ? "Next" : "Skip") {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            currentStep += 1
+                if currentStep < steps.count - 1 {
+                    // Skipping isn't the recommended action, so it doesn't get
+                    // prominent styling — only "Next" does.
+                    if stepCompleted(currentStep) {
+                        Button("Next") {
+                            withAnimation(.easeInOut(duration: 0.2)) { currentStep += 1 }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                    } else {
+                        Button("Skip for Now") {
+                            withAnimation(.easeInOut(duration: 0.2)) { currentStep += 1 }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
                 } else {
                     Button("Get Started") {
                         onComplete()
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .tint(.green)
                 }
             }
             .padding(.horizontal, 40)
@@ -472,27 +492,19 @@ struct OnboardingView: View {
             isGranted: screenRecordingGranted,
             actionTitle: "Open Screen Recording Settings",
             action: {
-                // macOS 13+ deep link
-                if let url = URL(string: "x-apple.systempreferences:com.apple.PrivacySecurity.extension?Privacy_ScreenCapture") {
-                    NSWorkspace.shared.open(url)
-                }
-                // Fallback for older macOS
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                    NSWorkspace.shared.open(url)
+                // Open one pane, not two. Both URLs used to be opened
+                // unconditionally, so System Settings was launched twice and
+                // could land on the wrong pane.
+                let paneURLs = [
+                    "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+                ]
+                for string in paneURLs {
+                    if let url = URL(string: string), NSWorkspace.shared.open(url) {
+                        break
+                    }
                 }
             }
-        )
-    }
-
-    private var accessibilityStep: some View {
-        PermissionStepCard(
-            icon: "keyboard",
-            iconColor: .blue,
-            title: "Local Control",
-            description: "YC Cast is display-only. Keep using this Mac's keyboard, trackpad, and clipboard to control the extended display.",
-            isGranted: true,
-            actionTitle: "",
-            action: {}
         )
     }
 
@@ -544,30 +556,22 @@ struct OnboardingView: View {
     private func stepCompleted(_ step: Int) -> Bool {
         switch step {
         case 0: return screenRecordingGranted
-        case 1: return true
-        case 2: return true
-        default: return false
+        default: return true
         }
     }
 
     private func checkPermissions() {
         // Screen Recording: check via CGPreflightScreenCaptureAccess (macOS 10.15+)
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
-
-        accessibilityGranted = true
     }
 
     private func startPolling() {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
             checkPermissions()
-            // Auto-advance when permission is granted on current step
+            // Advance once the permission the user just went to grant comes back.
             if currentStep == 0 && screenRecordingGranted {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     currentStep = 1
-                }
-            } else if currentStep == 1 && accessibilityGranted {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    currentStep = 2
                 }
             }
         }
@@ -1050,6 +1054,57 @@ struct DetailPanelView: View {
     @Binding var hasCompletedOnboarding: Bool
     @AppStorage("hasCompletedTour") private var hasCompletedTour = false
     @State private var pairingCodeInput = ""
+    @State private var pairingAlert: PairingAlert?
+    @State private var pendingDestructiveAction: DestructiveAction?
+
+    /// Feedback for a pairing-code save. Previously a failed save changed nothing
+    /// on screen, so it was indistinguishable from success.
+    private struct PairingAlert: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+    }
+
+    /// Actions that cannot be undone, or that end the current session.
+    private enum DestructiveAction: String, Identifiable {
+        case clearPairing
+        case resetPermissions
+        case restart
+        case setupWizard
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .clearPairing: return "Clear the pairing code?"
+            case .resetPermissions: return "Reset Screen Recording permission?"
+            case .restart: return "Restart YC Cast?"
+            case .setupWizard: return "Run the setup wizard again?"
+            }
+        }
+
+        var message: String {
+            switch self {
+            case .clearPairing:
+                return "Any connected iPad is disconnected immediately, and you'll need to enter the same code on both devices again."
+            case .resetPermissions:
+                return "macOS revokes Screen Recording for YC Cast and the app restarts to ask for it again. Streaming stops."
+            case .restart:
+                return "Streaming stops and any connected iPad is disconnected."
+            case .setupWizard:
+                return "You'll go back to the first-run screens. Your pairing code and devices are kept."
+            }
+        }
+
+        var confirmTitle: String {
+            switch self {
+            case .clearPairing: return "Clear Pairing"
+            case .resetPermissions: return "Reset Permission"
+            case .restart: return "Restart"
+            case .setupWizard: return "Run Wizard"
+            }
+        }
+    }
 
     var body: some View {
         switch selection {
@@ -1206,15 +1261,49 @@ struct DetailPanelView: View {
 
                 HStack {
                     Button("Save Pairing Code") {
-                        if client.savePairingCode(pairingCodeInput) {
+                        switch client.savePairingCode(pairingCodeInput) {
+                        case .saved:
                             pairingCodeInput = ""
+                            pairingAlert = PairingAlert(
+                                title: "Pairing Code Saved",
+                                message: "Enter the same code on your iPad to finish pairing."
+                            )
+                        case .tooWeak:
+                            pairingAlert = PairingAlert(
+                                title: "Pairing Code Too Weak",
+                                message: "Use at least \(PairingAuthenticator.minimumSecretLength) letters or digits and don't repeat a single character. Spaces and dashes are ignored, so \"-\" alone is not a code."
+                            )
+                        case .storageFailed:
+                            pairingAlert = PairingAlert(
+                                title: "Couldn't Save Pairing Code",
+                                message: "The keychain refused the write. Try again, and restart YC Cast if it keeps failing."
+                            )
                         }
                     }
                     .disabled(pairingCodeInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                    Button("Clear Pairing") {
-                        client.clearPairingSecret()
-                        pairingCodeInput = ""
+                    Button("Generate") {
+                        let code = PairingAuthenticator.generatePairingCode()
+                        switch client.savePairingCode(code) {
+                        case .saved:
+                            pairingCodeInput = ""
+                            // The field is a SecureField, so the code has to be
+                            // shown here or it can never be typed on the iPad.
+                            pairingAlert = PairingAlert(
+                                title: "Pairing Code: \(code)",
+                                message: "Saved on this Mac. Enter this code on your iPad to pair. It won't be shown again — generate a new one if you lose it."
+                            )
+                        case .tooWeak, .storageFailed:
+                            pairingAlert = PairingAlert(
+                                title: "Couldn't Save Pairing Code",
+                                message: "The keychain refused the write. Try again, and restart YC Cast if it keeps failing."
+                            )
+                        }
+                    }
+                    .help("Create a strong random code and save it on this Mac")
+
+                    Button("Clear Pairing…") {
+                        pendingDestructiveAction = .clearPairing
                     }
                     .disabled(!client.hasPairingSecret)
                 }
@@ -1238,7 +1327,7 @@ struct DetailPanelView: View {
                         Text("Private TCP only")
                             .foregroundStyle(.secondary)
                     }
-                    InfoTip(text: "This private build uses one authenticated TCP stream for video, input, heartbeat, and optional audio.")
+                    InfoTip(text: "Video, heartbeat, keyframe requests, and screen-size updates share one authenticated TCP stream. Turning on Chrome Audio opens a second authenticated stream alongside it. The iPad sends no pointer or keyboard input.")
                 }
 
                 HStack {
@@ -1269,22 +1358,22 @@ struct DetailPanelView: View {
                         }
                         .disabled(!client.isConnected)
 
-                        Button("Screen Recording") {
+                        Button("Screen Recording Settings…") {
                             client.openPrivacySettings()
                         }
 
-                        Button("Reset Permissions") {
-                            client.resetScreenCapturePermissions()
+                        Button("Reset Permissions…") {
+                            pendingDestructiveAction = .resetPermissions
                         }
 
-                        Button("Restart") {
-                            client.restartApp()
+                        Button("Restart…") {
+                            pendingDestructiveAction = .restart
                         }
                     }
 
                     HStack(spacing: 10) {
-                        Button("Setup Wizard") {
-                            hasCompletedOnboarding = false
+                        Button("Setup Wizard…") {
+                            pendingDestructiveAction = .setupWizard
                         }
 
                         Button("Replay Tour") {
@@ -1379,6 +1468,41 @@ struct DetailPanelView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
+        .alert(item: $pairingAlert) { alert in
+            Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("OK")))
+        }
+        // None of these could be undone, and none of them used to ask first.
+        .confirmationDialog(
+            pendingDestructiveAction?.title ?? "",
+            isPresented: Binding(
+                get: { pendingDestructiveAction != nil },
+                set: { if !$0 { pendingDestructiveAction = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDestructiveAction
+        ) { action in
+            Button(action.confirmTitle, role: action == .setupWizard ? nil : .destructive) {
+                perform(action)
+                pendingDestructiveAction = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDestructiveAction = nil }
+        } message: { action in
+            Text(action.message)
+        }
+    }
+
+    private func perform(_ action: DestructiveAction) {
+        switch action {
+        case .clearPairing:
+            client.clearPairingSecret()
+            pairingCodeInput = ""
+        case .resetPermissions:
+            client.resetScreenCapturePermissions()
+        case .restart:
+            client.restartApp()
+        case .setupWizard:
+            hasCompletedOnboarding = false
+        }
     }
 
     private func deviceIcon(for service: DiscoveredService) -> String {
@@ -2392,6 +2516,7 @@ private enum PairingTransportError: LocalizedError {
     case unsupportedProtocol
     case invalidProof
     case sendFailed(Error?)
+    case handshakeTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -2411,7 +2536,27 @@ private enum PairingTransportError: LocalizedError {
             return "Pairing proof did not match"
         case .sendFailed(let error):
             return error?.localizedDescription ?? "Pairing send failed"
+        case .handshakeTimedOut:
+            return "Receiver did not finish pairing in time"
         }
+    }
+}
+
+/// Ensures a completion handler runs exactly once.
+///
+/// Handshake completions can be reached from the Network queue and from a
+/// timeout scheduled on main. Without this, a late reply after a timeout would
+/// deliver a second result for the same attempt.
+private final class SingleCompletionGuard {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
     }
 }
 
@@ -2458,9 +2603,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     func isConnecting(to service: DiscoveredService) -> Bool {
         connectingServiceNames.contains(deviceKey(for: service.name))
     }
-    @Published var useVirtualDisplay: Bool = true // Toggle between mirroring and extended display
+    @Published var useVirtualDisplay: Bool = true { // Toggle between mirroring and extended display
+        didSet { UserDefaults.standard.set(useVirtualDisplay, forKey: Self.useVirtualDisplayKey) }
+    }
     @Published var audioStreamingEnabled: Bool = false { // Master toggle for audio streaming
         didSet {
+            UserDefaults.standard.set(audioStreamingEnabled, forKey: Self.audioStreamingEnabledKey)
             if oldValue != audioStreamingEnabled && isConnected {
                 updateStreamResolution()
             }
@@ -2498,8 +2646,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private var lastStatsTime: Date = Date()
     
     // Settings
-    @Published var selectedResolution: VirtualDisplayManager.Resolution = VirtualDisplayManager.receiverBestFitResolution
-    @Published var isRetina: Bool = false
+    @Published var selectedResolution: VirtualDisplayManager.Resolution = VirtualDisplayManager.receiverBestFitResolution {
+        didSet { UserDefaults.standard.set(selectedResolution.name, forKey: Self.selectedResolutionKey) }
+    }
+    @Published var isRetina: Bool = false {
+        didSet { UserDefaults.standard.set(isRetina, forKey: Self.isRetinaKey) }
+    }
     @Published var displayPlacement: VirtualDisplayManager.DisplayPlacement = .right {
         didSet {
             UserDefaults.standard.set(displayPlacement.rawValue, forKey: Self.displayPlacementDefaultsKey)
@@ -2517,13 +2669,63 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
     
-    @Published var selectedQuality: StreamQuality = .high
-    
+    @Published var selectedQuality: StreamQuality = .high {
+        didSet { UserDefaults.standard.set(selectedQuality.rawValue, forKey: Self.selectedQualityKey) }
+    }
+
     // Private build uses Apple peer-to-peer/AWDL first.
-    @Published var interfacePreference: NetworkInterfacePreference = .auto
+    @Published var interfacePreference: NetworkInterfacePreference = .auto {
+        didSet { UserDefaults.standard.set(interfacePreference.rawValue, forKey: Self.interfacePreferenceKey) }
+    }
 
     // Auto-connect: automatically connect to discovered receivers
-    @Published var autoConnect: Bool = false
+    @Published var autoConnect: Bool = false {
+        didSet { UserDefaults.standard.set(autoConnect, forKey: Self.autoConnectKey) }
+    }
+
+    // MARK: - Persisted settings
+    //
+    // These all used to be plain @Published values, so every one of them silently
+    // reverted to its default on the next launch.
+    private static let useVirtualDisplayKey = "settings.useVirtualDisplay"
+    private static let audioStreamingEnabledKey = "settings.audioStreamingEnabled"
+    private static let selectedResolutionKey = "settings.selectedResolutionName"
+    private static let isRetinaKey = "settings.isRetina"
+    private static let selectedQualityKey = "settings.selectedQuality"
+    private static let interfacePreferenceKey = "settings.interfacePreference"
+    private static let autoConnectKey = "settings.autoConnect"
+
+    /// Restores saved settings, falling back to the default when a stored value
+    /// no longer maps to anything valid (for example a resolution preset that was
+    /// renamed or removed in a later build).
+    private func restorePersistedSettings() {
+        let defaults = UserDefaults.standard
+
+        if defaults.object(forKey: Self.useVirtualDisplayKey) != nil {
+            useVirtualDisplay = defaults.bool(forKey: Self.useVirtualDisplayKey)
+        }
+        if defaults.object(forKey: Self.audioStreamingEnabledKey) != nil {
+            audioStreamingEnabled = defaults.bool(forKey: Self.audioStreamingEnabledKey)
+        }
+        if defaults.object(forKey: Self.isRetinaKey) != nil {
+            isRetina = defaults.bool(forKey: Self.isRetinaKey)
+        }
+        if defaults.object(forKey: Self.autoConnectKey) != nil {
+            autoConnect = defaults.bool(forKey: Self.autoConnectKey)
+        }
+        if let name = defaults.string(forKey: Self.selectedResolutionKey),
+           let match = VirtualDisplayManager.defaultResolutions.first(where: { $0.name == name }) {
+            selectedResolution = match
+        }
+        if defaults.object(forKey: Self.selectedQualityKey) != nil,
+           let quality = StreamQuality(rawValue: defaults.integer(forKey: Self.selectedQualityKey)) {
+            selectedQuality = quality
+        }
+        if let raw = defaults.string(forKey: Self.interfacePreferenceKey),
+           let preference = NetworkInterfacePreference(rawValue: raw) {
+            interfacePreference = preference
+        }
+    }
 
     // Manual connection
     @Published var manualHost: String = ""
@@ -2674,6 +2876,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         displayPlacement = UserDefaults.standard.string(forKey: Self.displayPlacementDefaultsKey)
             .flatMap(VirtualDisplayManager.DisplayPlacement.init(rawValue:)) ?? .right
         hiddenDeviceKeys = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenDeviceKeysDefaultsKey) ?? [])
+        restorePersistedSettings()
         // YC Cast is display-only: all direct control stays on the Mac.
         UserDefaults.standard.removeObject(forKey: "iPadInputEnabled")
         
@@ -2717,21 +2920,39 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
-    func savePairingCode(_ code: String) -> Bool {
-        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
+    /// Result of a pairing-code save, so the UI can explain a failure instead of
+    /// silently doing nothing.
+    enum PairingSaveResult: Equatable {
+        case saved
+        case tooWeak
+        case storageFailed
+    }
+
+    func savePairingCode(_ code: String) -> PairingSaveResult {
+        // Normalization strips whitespace and `-`, so "-" and "---" previously
+        // passed the non-empty check and became SHA256("") — a fixed secret
+        // shared by every install that did it.
+        guard PairingAuthenticator.isAcceptableSecretInput(code) else {
+            LogManager.shared.log("Pairing: Rejected pairing code — too short or no variety")
+            return .tooWeak
+        }
         do {
-            let secret = PairingAuthenticator.normalizedSecret(from: trimmed)
+            let secret = PairingAuthenticator.normalizedSecret(from: code)
             try pairingSecretStore.saveSecret(secret)
             hasPairingSecret = true
             LogManager.shared.log("Pairing: Pairing code saved")
-            return true
+            return .saved
         } catch {
             LogManager.shared.log("Pairing: Failed to save pairing code")
-            return false
+            return .storageFailed
         }
     }
 
+    /// Clears the pairing secret and drops every session that was authenticated
+    /// with it.
+    ///
+    /// Deleting only the stored secret left existing sessions streaming, so
+    /// "Clear Pairing" did not actually revoke anything until the next restart.
     func clearPairingSecret() {
         do {
             try pairingSecretStore.deleteSecret()
@@ -2739,6 +2960,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Pairing: Pairing cleared")
         } catch {
             LogManager.shared.log("Pairing: Failed to clear pairing")
+        }
+
+        if !pipelines.isEmpty {
+            LogManager.shared.log("Pairing: Revoking \(pipelines.count) active session(s)")
+            disconnect()
         }
     }
 
@@ -2772,21 +2998,23 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     private func receiveLengthPrefixedData(on connection: NWConnection, completion: @escaping (Result<Data, Error>) -> Void) {
-        connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { content, _, _, error in
+        connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { content, _, isComplete, error in
             if let error {
                 completion(.failure(error))
                 return
             }
 
-            guard let content, content.count == 4 else {
+            guard let content, content.count == 4, !isComplete else {
                 completion(.failure(PairingTransportError.emptyFrame))
                 return
             }
 
-            let length = content.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            let bodyLength = Int(length)
-            guard bodyLength > 0 && bodyLength <= 64 * 1024 else {
-                completion(.failure(PairingTransportError.invalidFrameLength(bodyLength)))
+            let rawLength = content.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+            let bodyLength: Int
+            do {
+                bodyLength = try StreamFraming.validateBodyLength(rawLength, limit: StreamFraming.maxHandshakeFrameBytes)
+            } catch {
+                completion(.failure(PairingTransportError.invalidFrameLength(Int(rawLength))))
                 return
             }
 
@@ -2828,17 +3056,33 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
+    /// A peer that accepts the TCP connection but never sends its hello used to
+    /// leave the sender in `Authenticating` forever: the 5s connect timer is
+    /// cancelled as soon as TCP reaches `.ready`, and nothing bounded the
+    /// handshake that follows.
+    private static let handshakeTimeout: TimeInterval = 10
+
     private func performPairingHandshake(
         on connection: NWConnection,
         secret: Data,
         completion: @escaping (Result<Data, Error>) -> Void
     ) {
+        let completionGuard = SingleCompletionGuard()
+        let finish: (Result<Data, Error>) -> Void = { result in
+            guard completionGuard.claim() else { return }
+            completion(result)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.handshakeTimeout) {
+            finish(.failure(PairingTransportError.handshakeTimedOut))
+        }
+
         let senderNonce = PairingAuthenticator.randomNonce()
         let hello = SenderHello(senderNonce: senderNonce)
 
         sendCodable(hello, on: connection) { [weak self] sendResult in
             if case .failure(let error) = sendResult {
-                completion(.failure(error))
+                finish(.failure(error))
                 return
             }
 
@@ -2851,7 +3095,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         senderNonce: senderNonce,
                         receiverNonce: receiverHello.receiverNonce
                     ) else {
-                        completion(.failure(PairingTransportError.invalidProof))
+                        finish(.failure(PairingTransportError.invalidProof))
                         return
                     }
 
@@ -2868,13 +3112,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     self?.sendCodable(proof, on: connection) { proofResult in
                         switch proofResult {
                         case .success:
-                            completion(.success(sessionKey))
+                            finish(.success(sessionKey))
                         case .failure(let error):
-                            completion(.failure(error))
+                            finish(.failure(error))
                         }
                     }
                 case .failure(let error):
-                    completion(.failure(error))
+                    finish(.failure(error))
                 }
             }
         }
@@ -3141,7 +3385,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         case .routerOnly:
             parameters.serviceClass = .interactiveVideo
             parameters.prohibitedInterfaceTypes = [.loopback]
-            // Allow standard routing
+            // "Force Router/WiFi" has to actually exclude AWDL. This was left at
+            // the `true` set earlier in the function, so the system could still
+            // pick a peer-to-peer path — after which the sender misread the link
+            // as P2P and applied P2P bitrate and backpressure settings to what
+            // was really an infrastructure link.
+            parameters.includePeerToPeer = false
 
         case .wiredCable:
             // USB-C / Thunderbolt Bridge / Ethernet cable direct connection
@@ -3293,17 +3542,27 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         LogManager.shared.log("Sender: Connected via Path: \(path)")
                         LogManager.shared.log("Sender: Interfaces: \(interfaces)")
 
-                        if interfaces.contains("awdl") {
+                        // `availableInterfaces` lists every interface this path could
+                        // use, ordered with the selected one first. Matching "awdl"
+                        // anywhere in that list meant "this Mac has an AWDL interface"
+                        // was read as "this connection is peer-to-peer" — true on
+                        // essentially every Wi-Fi Mac. Router links were therefore
+                        // given P2P bitrate and P2P backpressure, which is the wrong
+                        // shape for an infrastructure path.
+                        let selectedInterface = path.availableInterfaces.first?.name.lowercased() ?? ""
+                        LogManager.shared.log("Sender: Selected interface: \(selectedInterface.isEmpty ? "unknown" : selectedInterface)")
+
+                        if selectedInterface.contains("awdl") {
                             isP2P = true
                             LogManager.shared.log("Sender: P2P Direct Link (AWDL) Active ✅")
-                        } else if interfaces.contains("lo0") || interfaces.contains("loopback") {
+                        } else if selectedInterface.hasPrefix("lo") {
                             isLoopback = true
                             LogManager.shared.log("Sender: Loopback/ADB tunnel — high bandwidth mode 🔌")
                         } else if self?.isLikelyWiredCablePath(path) == true {
                             isWiredCable = true
                             LogManager.shared.log("Sender: Wired/iPad USB path active ✅")
                         } else {
-                            LogManager.shared.log("Sender: Likely using Router/Infrastructure ⚠️")
+                            LogManager.shared.log("Sender: Using Router/Infrastructure path ⚠️")
                         }
                     }
 
@@ -3712,17 +3971,27 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         LogManager.shared.log("Sender: Connected via Path: \(path)")
                         LogManager.shared.log("Sender: Interfaces: \(interfaces)")
 
-                        if interfaces.contains("awdl") {
+                        // `availableInterfaces` lists every interface this path could
+                        // use, ordered with the selected one first. Matching "awdl"
+                        // anywhere in that list meant "this Mac has an AWDL interface"
+                        // was read as "this connection is peer-to-peer" — true on
+                        // essentially every Wi-Fi Mac. Router links were therefore
+                        // given P2P bitrate and P2P backpressure, which is the wrong
+                        // shape for an infrastructure path.
+                        let selectedInterface = path.availableInterfaces.first?.name.lowercased() ?? ""
+                        LogManager.shared.log("Sender: Selected interface: \(selectedInterface.isEmpty ? "unknown" : selectedInterface)")
+
+                        if selectedInterface.contains("awdl") {
                             isP2P = true
                             LogManager.shared.log("Sender: P2P Direct Link (AWDL) Active ✅")
-                        } else if interfaces.contains("lo0") || interfaces.contains("loopback") {
+                        } else if selectedInterface.hasPrefix("lo") {
                             isLoopback = true
                             LogManager.shared.log("Sender: Loopback/ADB tunnel — high bandwidth mode 🔌")
                         } else if self?.isLikelyWiredCablePath(path) == true {
                             isWiredCable = true
                             LogManager.shared.log("Sender: Wired/iPad USB path active ✅")
                         } else {
-                            LogManager.shared.log("Sender: Likely using Router/Infrastructure ⚠️")
+                            LogManager.shared.log("Sender: Using Router/Infrastructure path ⚠️")
                         }
                     }
 
@@ -3871,6 +4140,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             pipeline.screenRecorder?.stopCapture()
             pipeline.processAudioCapture?.stop()
             pipeline.audioConnection?.cancel()
+            pipeline.videoEncoder?.invalidate()
             pipeline.virtualDisplayManager?.destroyDisplay()
             InputHandler.shared.removeDisplayBounds(for: id)
             pipelines[id]?.screenRecorder = nil
@@ -3996,6 +4266,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         pipeline.screenRecorder?.stopCapture()
         pipeline.processAudioCapture?.stop()
         pipeline.audioConnection?.cancel()
+        pipeline.videoEncoder?.invalidate()
         pipeline.virtualDisplayManager?.destroyDisplay()
         let didSendDisconnectNotice = sendDisconnectNotice(for: pipeline)
         if didSendDisconnectNotice {
@@ -4052,8 +4323,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         for (id, pipeline) in pipelines {
             pipeline.screenRecorder?.stopCapture()
             pipeline.processAudioCapture?.stop()
+            // Drain the encoder before dropping it so no VideoToolbox callback
+            // lands on a released object.
+            pipeline.videoEncoder?.invalidate()
             pipeline.virtualDisplayManager?.destroyDisplay()
             pipeline.connection.cancel()
+            // The auxiliary audio connection is a second authenticated TCP
+            // session. Leaving it open here kept the receiver believing it was
+            // still connected after the main session had gone.
+            pipeline.audioConnection?.cancel()
             InputHandler.shared.removeDisplayBounds(for: id)
         }
         pipelines.removeAll()
@@ -4146,11 +4424,44 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 return
             }
 
-            if let content = content, content.count == 4 {
-                let length = content.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-                let bodyLength = Int(length)
+            // A clean close arrives as isComplete with no error. Treating it as
+            // "keep receiving" left the UI and the virtual display alive until the
+            // 15s heartbeat timeout and kept re-arming receives on a finished stream.
+            if isComplete {
+                LogManager.shared.log("Sender: Receiver closed the control stream")
+                DispatchQueue.main.async {
+                    self?.removeConnection(connectionId, attemptReconnect: true, reason: "peer closed connection")
+                }
+                return
+            }
 
-                connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { body, bodyContext, isComplete, error in
+            if let content = content, content.count == 4 {
+                let rawLength = content.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+
+                // The length is peer-supplied and therefore untrusted even after
+                // pairing. Without a cap this asked the socket for up to ~4 GiB.
+                let bodyLength: Int
+                do {
+                    bodyLength = try StreamFraming.validateBodyLength(rawLength, limit: StreamFraming.maxControlFrameBytes)
+                } catch {
+                    LogManager.shared.log("Sender: Rejected control frame length \(rawLength) (\(error)) — closing connection")
+                    DispatchQueue.main.async {
+                        self?.removeConnection(connectionId, attemptReconnect: false, reason: "invalid control frame length")
+                    }
+                    return
+                }
+
+                connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { body, bodyContext, bodyComplete, bodyError in
+                    if bodyError != nil || (body?.count ?? 0) != bodyLength {
+                        // A short body means the stream ended mid-frame; anything we
+                        // decoded from it would be garbage.
+                        LogManager.shared.log("Sender: Control frame truncated (expected \(bodyLength), got \(body?.count ?? 0))")
+                        DispatchQueue.main.async {
+                            self?.removeConnection(connectionId, attemptReconnect: true, reason: "truncated control frame")
+                        }
+                        return
+                    }
+
                     // All pipelines access must happen on main thread to avoid dictionary races
                     DispatchQueue.main.async {
                         guard let self = self, let body = body, let pipeline = self.pipelines[connectionId] else { return }
@@ -4244,9 +4555,36 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 return
             }
 
-            let length = content.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            let bodyLength = Int(length)
-            connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { [weak self] body, _, _, _ in
+            let rawLength = content.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+
+            let bodyLength: Int
+            do {
+                bodyLength = try StreamFraming.validateBodyLength(rawLength, limit: StreamFraming.maxControlFrameBytes)
+            } catch {
+                LogManager.shared.log("AudioConnection: Rejected frame length \(rawLength) (\(error)) — dropping auxiliary connection")
+                connection.cancel()
+                DispatchQueue.main.async {
+                    if self?.pipelines[connectionId]?.audioConnection === connection {
+                        self?.pipelines[connectionId]?.audioConnection = nil
+                        self?.pipelines[connectionId]?.audioSessionKey = nil
+                    }
+                }
+                return
+            }
+
+            connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { [weak self] body, _, bodyComplete, bodyError in
+                if bodyError != nil || (body?.count ?? 0) != bodyLength {
+                    LogManager.shared.log("AudioConnection: Frame truncated (expected \(bodyLength), got \(body?.count ?? 0))")
+                    connection.cancel()
+                    DispatchQueue.main.async {
+                        if self?.pipelines[connectionId]?.audioConnection === connection {
+                            self?.pipelines[connectionId]?.audioConnection = nil
+                            self?.pipelines[connectionId]?.audioSessionKey = nil
+                        }
+                    }
+                    return
+                }
+
                 DispatchQueue.main.async {
                     guard let self,
                           let body,
@@ -4303,6 +4641,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private func stopPipeline(for connectionId: UUID) {
         pipelines[connectionId]?.screenRecorder?.stopCapture()
         pipelines[connectionId]?.screenRecorder = nil
+        // Resolution and orientation changes run through here while frames are
+        // still in flight, so the encoder must be drained, not just dropped.
+        pipelines[connectionId]?.videoEncoder?.invalidate()
         pipelines[connectionId]?.videoEncoder = nil
         pipelines[connectionId]?.processAudioCapture?.stop()
         pipelines[connectionId]?.processAudioCapture = nil
@@ -4448,10 +4789,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 LogManager.shared.log("Sender: USB ADB mode — \(fps) FPS / \(bitrate / 1_000_000) Mbps / KF every 10s for \(serviceName)")
             }
         } else {
-            // Infrastructure (WiFi router, Windows/Linux receivers)
-            // 30 FPS matches actual WiFi throughput — avoids frame drops that cause glitching.
-            // Each frame gets 2x bit budget vs 60 FPS = sharper motion.
-            fps = 30
+            // Infrastructure (WiFi router, Windows/Linux receivers).
+            //
+            // Until the P2P detection fix, "awdl" appearing anywhere in the
+            // interface list marked nearly every connection as P2P, so this branch
+            // almost never ran and router links were really running the 60 FPS
+            // profile below. Dropping them to 30 FPS now that detection is correct
+            // would read as a regression, and for desktop content it isn't needed:
+            // static frames cost almost nothing, so frame rate is cheap and motion
+            // smoothness is what the user actually sees.
+            fps = 60
             bitrate = min(selectedQuality.rawValue, StreamQuality.high.rawValue)
             keyframeInterval = 2.0  // Short interval for fast error recovery over WiFi
             let capNote = bitrate < selectedQuality.rawValue ? " (capped from \(selectedQuality.rawValue / 1_000_000) Mbps for WiFi stability)" : ""
@@ -4552,8 +4899,20 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             logicalHeight: logical.height,
             backingWidth: logical.width * backingScale,
             backingHeight: logical.height * backingScale,
-            captureWidth: roundedEvenPixelCount(Double(reportedWidth)),
-            captureHeight: roundedEvenPixelCount(Double(reportedHeight))
+            // Capture at exactly the virtual display's backing size.
+            //
+            // This used to capture at the iPad's reported native pixel size,
+            // which is not the size of the display being captured: with a fixed
+            // 1344pt logical long edge, a 2752x2064 iPad produces a 2688x2016
+            // backing store. Asking ScreenCaptureKit for 2752x2064 made it
+            // resample every frame by ~2.4% before encoding — a non-integer
+            // scale, so text picked up softness everywhere, and part of the
+            // bitrate went into interpolated pixels.
+            //
+            // Capturing 1:1 keeps the encoder on real pixels. The aspect ratio is
+            // unchanged, so the iPad still scales it cleanly to fill the screen.
+            captureWidth: logical.width * backingScale,
+            captureHeight: logical.height * backingScale
         )
     }
 

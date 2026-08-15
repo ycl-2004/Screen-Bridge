@@ -23,6 +23,7 @@
 		BC1000020000000000000001 /* PrivateBetterCastConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC2000020000000000000001 /* PrivateBetterCastConstants.swift */; };
 		BC1000020000000000000002 /* PairingAuthenticator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC2000020000000000000002 /* PairingAuthenticator.swift */; };
 		BC1000020000000000000003 /* PairingSecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC2000020000000000000003 /* PairingSecretStore.swift */; };
+		BC1000020000000000000004 /* StreamFraming.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC2000020000000000000004 /* StreamFraming.swift */; };
 		BC1000030000000000000001 /* BetterCastShared.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BC2000030000000000000001 /* BetterCastShared.framework */; };
 		BC1000030000000000000002 /* BetterCastShared.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = BC2000030000000000000001 /* BetterCastShared.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		BC1000040000000000000001 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BC2000040000000000000001 /* UIKit.framework */; };
@@ -79,6 +80,7 @@
 		BC2000020000000000000001 /* PrivateBetterCastConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivateBetterCastConstants.swift; sourceTree = "<group>"; };
 		BC2000020000000000000002 /* PairingAuthenticator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingAuthenticator.swift; sourceTree = "<group>"; };
 		BC2000020000000000000003 /* PairingSecretStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingSecretStore.swift; sourceTree = "<group>"; };
+		BC2000020000000000000004 /* StreamFraming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamFraming.swift; sourceTree = "<group>"; };
 		BC2000030000000000000001 /* BetterCastShared.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = BetterCastShared.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		BC2000040000000000000001 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		BC2000040000000000000002 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
@@ -160,6 +162,7 @@
 				BC2000020000000000000001 /* PrivateBetterCastConstants.swift */,
 				BC2000020000000000000002 /* PairingAuthenticator.swift */,
 				BC2000020000000000000003 /* PairingSecretStore.swift */,
+				BC2000020000000000000004 /* StreamFraming.swift */,
 			);
 			path = BetterCastShared;
 			sourceTree = "<group>";
@@ -304,6 +307,7 @@
 				BC1000020000000000000001 /* PrivateBetterCastConstants.swift in Sources */,
 				BC1000020000000000000002 /* PairingAuthenticator.swift in Sources */,
 				BC1000020000000000000003 /* PairingSecretStore.swift in Sources */,
+				BC1000020000000000000004 /* StreamFraming.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

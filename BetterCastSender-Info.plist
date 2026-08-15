@@ -26,6 +26,12 @@
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>YC Cast finds your iPad on this local network and streams the extended display to it.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_yc-cast._tcp</string>
+    </array>
     <key>NSScreenCaptureUsageDescription</key>
     <string>YC Cast needs to capture your screen to stream it to the receiver.</string>
     <key>NSAudioCaptureUsageDescription</key>
