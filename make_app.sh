@@ -58,8 +58,9 @@ rm -rf "$APP_NAME" "BetterCast.app" "PrivateBetterCast.app" "BetterCastSender.ap
 echo "Creating $APP_NAME..."
 mkdir -p "$APP_NAME/Contents/MacOS"
 mkdir -p "$APP_NAME/Contents/Resources"
-# The executable name follows the current Swift package target.
-cp "$BUILD_DIR/BetterCastSender" "$APP_NAME/Contents/MacOS/BetterCastSender"
+# Keep the internal Swift package target name for compatibility, but expose the
+# product executable under the public ScreenBridge name.
+cp "$BUILD_DIR/BetterCastSender" "$APP_NAME/Contents/MacOS/ScreenBridge"
 cp "BetterCastSender-Info.plist" "$APP_NAME/Contents/Info.plist"
 cp "assets/branding/BetterCastIcon.icns" "$APP_NAME/Contents/Resources/AppIcon.icns"
 

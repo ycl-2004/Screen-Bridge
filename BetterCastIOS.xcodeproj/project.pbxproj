@@ -65,7 +65,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		BC2000000000000000000001 /* BetterCastReceiverIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BetterCastReceiverIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BC2000000000000000000001 /* ScreenBridge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScreenBridge.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BC2000010000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		BC2000010000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		BC2000010000000000000003 /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
@@ -193,7 +193,7 @@
 		BC7000000000000000000006 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				BC2000000000000000000001 /* BetterCastReceiverIOS.app */,
+				BC2000000000000000000001 /* ScreenBridge.app */,
 				BC2000030000000000000001 /* BetterCastShared.framework */,
 			);
 			name = Products;
@@ -217,8 +217,8 @@
 				BC3000000000000000000002 /* PBXTargetDependency */,
 			);
 			name = BetterCastReceiverIOS;
-			productName = BetterCastReceiverIOS;
-			productReference = BC2000000000000000000001 /* BetterCastReceiverIOS.app */;
+			productName = ScreenBridge;
+			productReference = BC2000000000000000000001 /* ScreenBridge.app */;
 			productType = "com.apple.product-type.application";
 		};
 		BC4000000000000000000002 /* BetterCastShared */ = {
@@ -394,7 +394,7 @@
 				);
 				MARKETING_VERSION = 8.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.yichen.yccast.receiver.ios;
-				PRODUCT_NAME = BetterCastReceiverIOS;
+				PRODUCT_NAME = ScreenBridge;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_VERSION = 5.0;
@@ -418,7 +418,7 @@
 				);
 				MARKETING_VERSION = 8.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.yichen.yccast.receiver.ios;
-				PRODUCT_NAME = BetterCastReceiverIOS;
+				PRODUCT_NAME = ScreenBridge;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_VERSION = 5.0;
