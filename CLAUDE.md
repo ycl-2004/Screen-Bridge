@@ -141,11 +141,17 @@ Package IPA after building:
 ./package_ios_ipa.sh
 ```
 
-### macOS Receiver Target
+### macOS Receiver Target (removed)
 
-Path: `Sources/BetterCastReceiver/`
+The `Sources/BetterCastReceiver/` target has been deleted. It predated the
+private pairing protocol: it advertised `_bettercast._tcp`, performed no pairing
+handshake, and did not link `BetterCastShared`, so the current sender could
+neither discover nor authenticate it. Keeping it around implied macOS could act
+as a receiver, which was not true.
 
-This is a Swift receiver target separate from the current iPad receiver. It is useful as protocol/reference code, but it is not the main ScreenBridge product path described in the README.
+Recover it from git history if a macOS receiver is ever wanted again; it would
+need a protocol v2 listener written from scratch (see `NetworkListenerIOS.swift`
+for the receiver side of the handshake).
 
 ### Android Receiver/Sender
 

@@ -32,6 +32,9 @@ class VideoDecoder {
     private var decompressionSession: VTDecompressionSession?
     private let decoderQueue = DispatchQueue(label: "com.yccast.video-decoder.lifecycle")
     private let decoderQueueKey = DispatchSpecificKey<UInt8>()
+    /// Guards `generation` only. Output now arrives on VideoToolbox's callback
+    /// thread instead of `decoderQueue`, so the two sides need a shared lock.
+    private let generationLock = NSLock()
     private var generation: UInt64 = 0
     private var callbackContext: VideoDecoderCallbackContext?
     
@@ -105,6 +108,20 @@ class VideoDecoder {
         LogManager.shared.log("VideoDecoder: Reset for new session")
     }
 
+    fileprivate func currentGeneration() -> UInt64 {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        return generation
+    }
+
+    @discardableResult
+    private func bumpGeneration() -> UInt64 {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        generation &+= 1
+        return generation
+    }
+
     private func syncOnDecoderQueue<T>(_ work: () -> T) -> T {
         if DispatchQueue.getSpecific(key: decoderQueueKey) != nil {
             return work()
@@ -113,7 +130,7 @@ class VideoDecoder {
     }
 
     private func invalidateCurrentSession() {
-        generation &+= 1
+        bumpGeneration()
         if let session = decompressionSession {
             VTDecompressionSessionWaitForAsynchronousFrames(session)
             VTDecompressionSessionInvalidate(session)
@@ -173,8 +190,7 @@ class VideoDecoder {
                 kCVPixelBufferOpenGLCompatibilityKey as String: true
             ]
 
-            generation &+= 1
-            let context = VideoDecoderCallbackContext(decoder: self, generation: generation)
+            let context = VideoDecoderCallbackContext(decoder: self, generation: bumpGeneration())
             callbackContext = context
             var outputCallback = VTDecompressionOutputCallbackRecord(
                 decompressionOutputCallback: decompressionCallback,
@@ -283,41 +299,50 @@ class VideoDecoder {
          }
     }
 
+    /// Wraps a decoded frame and hands it straight to the renderer.
+    ///
+    /// This deliberately does **not** hop through `decoderQueue`. That queue
+    /// also carries every `decode(data:)` submission, so routing output through
+    /// it made each decoded frame wait behind the next frames being submitted —
+    /// all while still holding a buffer from VideoToolbox's fixed-size pixel
+    /// buffer pool. Once the pool is exhausted the decoder cannot emit anything
+    /// and the picture freezes. Wrapping is cheap and allocation-free enough to
+    /// do inline on the callback thread, which releases the pool slot as early
+    /// as possible.
     fileprivate func handleDecodedOutput(
         imageBuffer: CVImageBuffer,
         presentationTimeStamp: CMTime,
         presentationDuration: CMTime,
         generation callbackGeneration: UInt64
     ) {
-        decoderQueue.async { [weak self] in
-            guard let self, self.generation == callbackGeneration else { return }
+        guard currentGeneration() == callbackGeneration else { return }
 
-            var sampleBuffer: CMSampleBuffer?
-            var timing = CMSampleTimingInfo(
-                duration: presentationDuration,
-                presentationTimeStamp: presentationTimeStamp,
-                decodeTimeStamp: .invalid
-            )
-            var formatDesc: CMVideoFormatDescription?
-            CMVideoFormatDescriptionCreateForImageBuffer(
-                allocator: kCFAllocatorDefault,
-                imageBuffer: imageBuffer,
-                formatDescriptionOut: &formatDesc
-            )
-            guard let desc = formatDesc else { return }
+        var timing = CMSampleTimingInfo(
+            duration: presentationDuration,
+            presentationTimeStamp: presentationTimeStamp,
+            decodeTimeStamp: .invalid
+        )
+        var formatDesc: CMVideoFormatDescription?
+        CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: imageBuffer,
+            formatDescriptionOut: &formatDesc
+        )
+        guard let desc = formatDesc else { return }
 
-            CMSampleBufferCreateReadyWithImageBuffer(
-                allocator: kCFAllocatorDefault,
-                imageBuffer: imageBuffer,
-                formatDescription: desc,
-                sampleTiming: &timing,
-                sampleBufferOut: &sampleBuffer
-            )
+        var sampleBuffer: CMSampleBuffer?
+        CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: imageBuffer,
+            formatDescription: desc,
+            sampleTiming: &timing,
+            sampleBufferOut: &sampleBuffer
+        )
 
-            guard let sampleBuffer else { return }
-            DispatchQueue.main.async { [weak self] in
-                self?.delegate?.didDecode(sampleBuffer: sampleBuffer)
-            }
+        guard let sampleBuffer else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.currentGeneration() == callbackGeneration else { return }
+            self.delegate?.didDecode(sampleBuffer: sampleBuffer)
         }
     }
 

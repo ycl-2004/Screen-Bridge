@@ -3054,6 +3054,19 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                   self.pipelines.isEmpty,
                   !self.localNetworkNeedsAttention else { return }
 
+            // Attribute the silence correctly. In a mode that bans interfaces,
+            // an empty result set usually means the permitted link is down —
+            // blaming the Local Network permission there sends the user to fix
+            // something that was never broken.
+            if self.interfacePreference != .auto {
+                LogManager.shared.log(
+                    "Sender: No devices found in \(Int(Self.discoverySilenceTimeout))s while restricted to "
+                        + "\(self.interfacePreference.rawValue). Either that link is down or the receiver is not on it — "
+                        + "switch to Auto to search every route."
+                )
+                return
+            }
+
             self.localNetworkNeedsAttention = true
             LogManager.shared.log(
                 "Sender: Bonjour browser has been ready for \(Int(Self.discoverySilenceTimeout))s "
@@ -3096,6 +3109,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private let interfaceMonitor = NWPathMonitor()
     private var cachedAWDLInterface: NWInterface?
     private var cachedInfraInterface: NWInterface?
+    /// The wired interface that currently carries an address, if any. Bonjour
+    /// also advertises the receiver on address-less wired links, so the wired
+    /// mode has to pick the usable one explicitly instead of letting the system
+    /// route onto a dead interface.
+    private var cachedWiredInterface: NWInterface?
     
     init() {
         LogManager.shared.log("Sender: App Starting")
@@ -3134,6 +3152,21 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         if isNew {
                             LogManager.shared.log("Network: Found Infra Interface: \(interface.name) (\(interface.type))")
                         }
+                    }
+                }
+
+                // Pick the wired interface that actually has an address. A USB
+                // interface left over from a previous enumeration stays listed
+                // as available while holding none, and dialing onto it just
+                // burns the whole retry budget on timeouts.
+                let addressable = Set(Self.addressableWiredInterfaces().map(\.name))
+                let usableWired = path.availableInterfaces.first {
+                    $0.type != .wifi && $0.type != .loopback && addressable.contains($0.name)
+                }
+                if usableWired?.name != self.cachedWiredInterface?.name {
+                    self.cachedWiredInterface = usableWired
+                    if let usableWired {
+                        LogManager.shared.log("Network: Usable wired interface: \(usableWired.name) (\(usableWired.type))")
                     }
                 }
             }
@@ -3543,7 +3576,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         return parameters
     }
 
-    private func startDedicatedAudioConnection(for connectionId: UUID) {
+    /// Wall-clock budget for the auxiliary audio dial.
+    ///
+    /// `NWConnection` parks in `.waiting` when no permitted route exists — it
+    /// never fails, so the TCP-level timeout never fires and the UI sat on
+    /// "Connecting" forever while encoded AAC was thrown away.
+    private static let audioConnectTimeout: TimeInterval = 8.0
+
+    private func startDedicatedAudioConnection(for connectionId: UUID, allowAnyRoute: Bool = false) {
         guard let pipeline = pipelines[connectionId], pipeline.supportsTypeByte else { return }
         guard pipeline.audioConnection == nil else { return }
         guard let secret = loadPairingSecret() else {
@@ -3553,10 +3593,18 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             return
         }
 
-        let audioConnection = NWConnection(
-            to: pipeline.streamEndpoint,
-            using: makeDedicatedAudioParameters(for: pipeline)
-        )
+        let audioParameters: NWParameters
+        if allowAnyRoute {
+            let tcpOptions = NWProtocolTCP.Options()
+            tcpOptions.enableKeepalive = true
+            tcpOptions.noDelay = true
+            tcpOptions.connectionTimeout = 10
+            audioParameters = NWParameters(tls: nil, tcp: tcpOptions)
+            audioParameters.serviceClass = .interactiveVideo
+        } else {
+            audioParameters = makeDedicatedAudioParameters(for: pipeline)
+        }
+        let audioConnection = NWConnection(to: pipeline.streamEndpoint, using: audioParameters)
         let serviceName = pipeline.service.name
         // Store the in-flight transport immediately so repeated setting
         // reconciliation cannot start duplicate auxiliary handshakes.
@@ -3565,12 +3613,42 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             setAudioState(.connecting, for: connectionId)
         }
 
+        // Bound the dial in wall-clock time so a route that never materialises
+        // degrades to another route instead of hanging in "Connecting".
+        var audioSettled = false
+        let audioTimeout = DispatchWorkItem { [weak self] in
+            guard let self, !audioSettled else { return }
+            audioSettled = true
+            guard self.pipelines[connectionId]?.audioConnection === audioConnection else { return }
+
+            if allowAnyRoute {
+                LogManager.shared.log("AudioConnection: Timed out on every route for \(serviceName)")
+                self.handleAudioConnectionEnded(
+                    audioConnection,
+                    connectionId: connectionId,
+                    reason: "audio transport timed out"
+                )
+            } else {
+                LogManager.shared.log(
+                    "AudioConnection: Timed out on the restricted route for \(serviceName) — "
+                        + "retrying without interface restrictions"
+                )
+                audioConnection.stateUpdateHandler = nil
+                audioConnection.cancel()
+                self.pipelines[connectionId]?.audioConnection = nil
+                self.startDedicatedAudioConnection(for: connectionId, allowAnyRoute: true)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.audioConnectTimeout, execute: audioTimeout)
+
         audioConnection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
                 guard let self else { return }
 
                 switch state {
                 case .ready:
+                    audioSettled = true
+                    audioTimeout.cancel()
                     self.performPairingHandshake(
                         on: audioConnection,
                         secret: secret,
@@ -3601,6 +3679,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         }
                     }
                 case .failed(let error):
+                    audioSettled = true
+                    audioTimeout.cancel()
                     LogManager.shared.log("AudioConnection: Failed for \(serviceName): \(error)")
                     self.handleAudioConnectionEnded(
                         audioConnection,
@@ -3608,11 +3688,17 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         reason: "transport failed"
                     )
                 case .cancelled:
+                    audioSettled = true
+                    audioTimeout.cancel()
                     self.handleAudioConnectionEnded(
                         audioConnection,
                         connectionId: connectionId,
                         reason: "transport cancelled"
                     )
+                case .waiting(let error):
+                    // Not an error yet, but it is why "Connecting" can persist:
+                    // no permitted route is available for this endpoint.
+                    LogManager.shared.log("AudioConnection: Waiting for a route to \(serviceName): \(error)")
                 default:
                     break
                 }
@@ -3673,6 +3759,36 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Sender: Connected path: \(path)")
         }
         LogManager.shared.log("Sender: \(route.description) active")
+    }
+
+    /// Wired (non-WiFi, non-loopback) interfaces that actually carry an IP
+    /// address right now.
+    ///
+    /// `ifconfig` reporting `status: active` is not enough: after a USB device
+    /// re-enumerates, its interface can stay active while holding no address,
+    /// and connections routed onto it hang until they time out.
+    static func addressableWiredInterfaces() -> [(name: String, address: String)] {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return [] }
+        defer { freeifaddrs(head) }
+
+        var found: [(name: String, address: String)] = []
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(ptr.pointee.ifa_flags)
+            guard flags & IFF_UP == IFF_UP, flags & IFF_LOOPBACK == 0 else { continue }
+            guard let addr = ptr.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+
+            let name = String(cString: ptr.pointee.ifa_name)
+            // en0 is the Wi-Fi radio on Apple laptops; this mode excludes it.
+            guard name != "en0", !name.hasPrefix("awdl"), !name.hasPrefix("llw"),
+                  !name.hasPrefix("utun"), !name.hasPrefix("gif"), !name.hasPrefix("stf") else { continue }
+
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(addr, socklen_t(addr.pointee.sa_len),
+                              &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            found.append((name: name, address: String(cString: host)))
+        }
+        return found
     }
 
     private func configureParameters(_ parameters: NWParameters) {
@@ -3736,7 +3852,29 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             parameters.prohibitedInterfaceTypes = [.loopback, .wifi]
             parameters.includePeerToPeer = false // No AWDL needed for cable
             parameters.preferNoProxies = true
-            LogManager.shared.log("Parameters: Wired/Cable mode - WiFi/P2P disabled, using Ethernet/Thunderbolt Bridge")
+
+            // A USB/Thunderbolt interface can sit in "active" state with no
+            // address at all after the device re-enumerates, and Bonjour keeps
+            // advertising the receiver on it. Every dial then times out against
+            // an address-less link while a perfectly good wired interface may be
+            // sitting right next to it. Say so up front instead of spending the
+            // whole retry budget rediscovering it.
+            // Deliberately NOT pinned to a specific interface: which port the
+            // cable lands on varies per machine and per plug, so binding one
+            // would break the moment it changes. The system picks; the log below
+            // just records what was actually usable at the time.
+            let wiredAddresses = Self.addressableWiredInterfaces()
+            if wiredAddresses.isEmpty {
+                LogManager.shared.log(
+                    "Parameters: Wired/Cable mode — WARNING: no wired interface currently has an IP address. "
+                        + "Connections will time out. Reconnect the cable or switch to Auto."
+                )
+            } else {
+                LogManager.shared.log(
+                    "Parameters: Wired/Cable mode - WiFi/P2P disabled, usable wired interfaces: "
+                        + wiredAddresses.map { "\($0.name)(\($0.address))" }.joined(separator: ", ")
+                )
+            }
         }
     }
     
@@ -3744,11 +3882,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     /// while the interface is still coming up, so a single retry was not
     /// enough: connecting over cable regularly needed three tries, and the
     /// user had to click Connect again by hand after ~16s of apparent failure.
-    private static let maximumConnectAttempts = 4
+    private static let maximumConnectAttempts = ConnectionRetryPolicy.maximumAttempts
     /// Pause between cable/AWDL warm-up retries. Dialing again immediately kept
     /// the receiver's pending-handshake slots occupied by connections we had
     /// just cancelled.
-    private static let connectRetryBackoff: TimeInterval = 1.5
+    private static let connectRetryBackoff: TimeInterval = ConnectionRetryPolicy.backoffSeconds
+    /// Budget for the unrestricted fallback dial — the end of every retry chain.
+    private static let fallbackConnectTimeout: TimeInterval = 10.0
 
     func connect(to service: DiscoveredService, attempt: Int = 1) {
         let serviceKey = deviceKey(for: service.name)
@@ -3760,7 +3900,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // Only a fresh, externally initiated connect is a duplicate. A retry
         // (attempt > 1) is the continuation of an attempt that already owns the
         // slot, so it must not be rejected by its own reservation.
-        if attempt == 1, connectingServiceNames.contains(serviceKey) {
+        guard ConnectionRetryPolicy.shouldAcceptConnect(
+            attempt: attempt,
+            hasReservation: connectingServiceNames.contains(serviceKey)
+        ) else {
             LogManager.shared.log("Sender: Already connecting to \(service.name) — ignoring duplicate")
             return
         }
@@ -3886,16 +4029,47 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         // handshake before the next dial arrives.
                         DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectRetryBackoff) { [weak self] in
                             guard let self else { return }
-                            guard self.connectingServiceNames.contains(serviceKey) else { return }
-                            guard self.pipelines.values.allSatisfy({ self.deviceKey(for: $0.service.name) != serviceKey }) else { return }
-                            self.connect(to: service, attempt: next)
+                            let deviceConnected = self.pipelines.values.contains {
+                                self.deviceKey(for: $0.service.name) == serviceKey
+                            }
+                            switch ConnectionRetryPolicy.backoffOutcome(
+                                hasReservation: self.connectingServiceNames.contains(serviceKey),
+                                deviceAlreadyConnected: deviceConnected
+                            ) {
+                            case .abandonSuperseded:
+                                return
+                            case .releaseReservation:
+                                self.connectingServiceNames.remove(serviceKey)
+                            case .proceedWithRetry:
+                                self.connect(to: service, attempt: next)
+                            }
                         }
                     } else {
-                        self.connectingServiceNames.remove(serviceKey)
-                        self.setPhase(.failed, "Connection to \(service.name) timed out")
+                        // The wired attempts are used up. Choosing a cable means
+                        // "prefer the fast link", not "refuse to connect if that
+                        // exact link is down" — and a USB interface can survive
+                        // re-enumeration as an address-less shell that Bonjour
+                        // still advertises on, which no amount of retrying fixes.
+                        // Hand off to an unrestricted dial so the system can use
+                        // whatever route actually reaches the device.
                         LogManager.shared.log(
                             "Sender: Connection to \(service.name) timed out in \(self.interfacePreference.rawValue) "
-                                + "after \(Self.maximumConnectAttempts) attempts"
+                                + "after \(Self.maximumConnectAttempts) attempts — falling back to any reachable route"
+                        )
+                        self.connectingServiceNames.remove(serviceKey)
+                        self.setPhase(.connecting, "Trying other routes to \(service.name)...")
+
+                        let tcpOptions = NWProtocolTCP.Options()
+                        tcpOptions.enableKeepalive = true
+                        tcpOptions.noDelay = true
+                        tcpOptions.connectionTimeout = 10
+                        let fallbackParams = NWParameters(tls: nil, tcp: tcpOptions)
+                        fallbackParams.serviceClass = .interactiveVideo
+                        self.connectWithParameters(
+                            service: service,
+                            parameters: fallbackParams,
+                            forceTCP: false,
+                            routeIntent: .infrastructure
                         )
                     }
                     return
@@ -3970,7 +4144,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     // keeps owning the reservation for the next dial. Releasing
                     // it here would re-open the door for a competing retry chain
                     // that the timeout handler just took care to prevent.
-                    if !connectionTimedOut {
+                    if ConnectionRetryPolicy.shouldReleaseReservationOnCancel(
+                        cancelledForRetry: connectionTimedOut
+                    ) {
                         self?.connectingServiceNames.remove(serviceKey)
                     }
                     self?.pendingConnections.removeValue(forKey: connectionId)
@@ -4343,10 +4519,36 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let connectionId = UUID()
         pendingConnections[connectionId] = connection
 
+        // This path is the destination of every fallback, so it is the last
+        // thing standing between a bad route and a permanently stuck device.
+        // `NWConnection` parks in `.waiting` instead of failing when no route
+        // is available, which would hold the per-device reservation forever and
+        // make the device unconnectable until the app restarted.
+        var settled = false
+        let timeoutWork = DispatchWorkItem { [weak self] in
+            guard let self, !settled else { return }
+            settled = true
+            guard self.pipelines[connectionId] == nil else { return }
+
+            LogManager.shared.log(
+                "Sender: Connection to \(service.name) timed out after \(Int(Self.fallbackConnectTimeout))s on the fallback route"
+            )
+            self.connectingServiceNames.remove(serviceKey)
+            self.pendingConnections.removeValue(forKey: connectionId)
+            connection.stateUpdateHandler = nil
+            connection.cancel()
+            if self.pipelines.isEmpty {
+                self.setPhase(.failed, "Connection to \(service.name) timed out")
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fallbackConnectTimeout, execute: timeoutWork)
+
         connection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
                 switch state {
                 case .ready:
+                    settled = true
+                    timeoutWork.cancel()
                     guard let self else { return }
                     let route = self.classifyConnectionRoute(
                         path: connection.currentPath,
@@ -4365,6 +4567,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         forceTCP: forceTCP
                     )
                 case .failed(let error):
+                    settled = true
+                    timeoutWork.cancel()
                     LogManager.shared.log("Sender: Connection to \(service.name) failed: \(error)")
                     self?.connectingServiceNames.remove(serviceKey)
                     self?.pendingConnections.removeValue(forKey: connectionId)
@@ -4383,6 +4587,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 case .waiting(let error):
                     self?.setPhase(.connecting, "Waiting for \(service.name)... (\(error.localizedDescription))")
                 case .cancelled:
+                    settled = true
+                    timeoutWork.cancel()
                     self?.connectingServiceNames.remove(serviceKey)
                     self?.pendingConnections.removeValue(forKey: connectionId)
                 default:
@@ -5667,7 +5873,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     /// bitrate down. These links get real headroom back; the queue stays bounded
     /// so a genuinely stalled link still cannot accumulate latency.
     private func maxFramesInFlight(for pipeline: ConnectionPipeline) -> Int {
-        (pipeline.isP2P || pipeline.isWiredCable || pipeline.isLoopback) ? 4 : 1
+        VideoFlightWindowPolicy.maxFramesInFlight(
+            isP2P: pipeline.isP2P,
+            isWiredCable: pipeline.isWiredCable,
+            isLoopback: pipeline.isLoopback
+        )
     }
 
     private func enqueueVideoPacket(_ packet: Data, isKeyframe: Bool, for connectionId: UUID) {

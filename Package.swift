@@ -11,7 +11,6 @@ let package = Package(
     ],
     products: [
         .executable(name: "BetterCastSender", targets: ["BetterCastSender"]),
-        .executable(name: "BetterCastReceiver", targets: ["BetterCastReceiver"]),
         .executable(name: "BetterCastReceiverIOS", targets: ["BetterCastReceiverIOS"]),
         .library(name: "BetterCastShared", targets: ["BetterCastShared"]),
     ],
@@ -51,15 +50,6 @@ let package = Package(
                 .linkedFramework("IOSurface"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreAudio")
-            ]
-        ),
-        .executableTarget(
-            name: "BetterCastReceiver",
-            linkerSettings: [
-                .linkedFramework("CoreMedia"),
-                .linkedFramework("VideoToolbox"),
-                .linkedFramework("Network"),
-                .linkedFramework("AVFoundation")
             ]
         ),
         .executableTarget(
