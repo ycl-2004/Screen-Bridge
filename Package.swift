@@ -4,7 +4,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "ScreenBridge",
+    name: "Screen Bridge",
     platforms: [
         .macOS(.v14), // Target modern macOS for ScreenCaptureKit
         .iOS(.v13)    // Target iOS 13+ for Receiver

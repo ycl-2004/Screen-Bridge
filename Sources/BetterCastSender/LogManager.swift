@@ -4,7 +4,7 @@ final class LogManager: ObservableObject, @unchecked Sendable {
     static let shared = LogManager()
     @Published var logs: [String] = []
 
-    /// Mirrors the in-app log to `~/Library/Logs/ScreenBridge/sender.log`.
+    /// Mirrors the in-app log to `~/Library/Logs/Screen Bridge/sender.log`.
     ///
     /// The in-memory buffer keeps only the last 200 lines and is lost when the
     /// app quits, and stdout is fully buffered when the app is launched by
@@ -15,7 +15,7 @@ final class LogManager: ObservableObject, @unchecked Sendable {
     private let fileHandle: FileHandle? = {
         let directory = FileManager.default
             .homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/ScreenBridge", isDirectory: true)
+            .appendingPathComponent("Library/Logs/Screen Bridge", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("sender.log")
 
@@ -52,21 +52,12 @@ final class LogManager: ObservableObject, @unchecked Sendable {
 
 // MARK: - App Version
 
-/// Version string shown in the About section.
+/// Public release identity shown in the settings UI.
 ///
-/// This used to be an update checker, but the check itself never did anything —
-/// `checkForUpdates()` only set two flags to false, and nothing read the
-/// published properties. Only the version string was ever used, so that is all
-/// that remains. Reintroduce the checking machinery alongside a real update
-/// mechanism, not before it.
+/// Internal self-built bundle numbers may advance while the product is still
+/// preparing its first public release, so the user-facing release stays v1.
 enum AppVersion {
-    /// Reads version from Info.plist (CFBundleShortVersionString), prefixed with "v".
-    static var current: String {
-        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
-        // Extract major version number to match GitHub tag format (e.g., "8.0" → "v8")
-        let major = short.components(separatedBy: ".").first ?? short
-        return "v\(major)"
-    }
+    static let current = "v1"
 }
 
 // MARK: - Changelog
@@ -75,16 +66,13 @@ struct Changelog {
     struct Entry: Identifiable {
         let id = UUID()
         let version: String
-        let date: String
         let highlights: [String]
     }
 
     static let entries: [Entry] = [
-        Entry(version: AppVersion.current, date: "2026-05-11", highlights: [
-            "iPad default display mode is Best Fit: 1344 x 934 HiDPI with native capture",
-            "iPad receiver opens in Fit Screen mode and requires full screen",
-            "Mac and iPad app icons are aligned for the private build",
-            "Cleaner settings help tips with adjustable network mode, bitrate, Retina, and audio controls",
+        Entry(version: AppVersion.current, highlights: [
+            "Extended or mirrored display streaming",
+            "Private pairing with optional Chrome audio",
         ]),
     ]
 }

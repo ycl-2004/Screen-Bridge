@@ -1,11 +1,11 @@
-<h1 align="center">ScreenBridge</h1>
+<h1 align="center">Screen Bridge</h1>
 
 <p align="center">
   <strong>Turn an iPad into a display-only extended screen for your Mac.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/ycl-2004/screenbridge/tree/v2.0"><img src="https://img.shields.io/badge/source%20tag-v2.0-111111" alt="Source tag v2.0"></a>
+  <a href="https://github.com/ycl-2004/Screen-Bridge/releases/tag/v1"><img src="https://img.shields.io/badge/release-v1-111111" alt="Screen Bridge v1 release"></a>
   <img src="https://img.shields.io/badge/macOS-14.0%2B-111111?logo=apple&logoColor=white" alt="macOS 14.0 or later">
   <img src="https://img.shields.io/badge/iPadOS-13.0%2B-111111?logo=apple&logoColor=white" alt="iPadOS 13.0 or later">
   <img src="https://img.shields.io/badge/Swift-SwiftUI%20%C2%B7%20Network.framework-F05138?logo=swift&logoColor=white" alt="Built with Swift and Apple frameworks">
@@ -14,6 +14,8 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a>
+  ·
+  <a href="https://github.com/ycl-2004/Screen-Bridge/releases/download/v1/Screen-Bridge-v1.dmg">Mac DMG</a>
   ·
   <a href="#features">Features</a>
   ·
@@ -24,7 +26,7 @@
   <a href="#build-from-source">Build from source</a>
 </p>
 
-ScreenBridge turns an iPad into a real extended display for a Mac. The Mac
+Screen Bridge turns an iPad into a real extended display for a Mac. The Mac
 creates a virtual display, captures it, and streams it over a local Apple
 device path; the Mac's keyboard, trackpad, mouse, clipboard, and system control
 stay on the Mac.
@@ -33,30 +35,31 @@ The active product path is a macOS sender plus an iPadOS receiver. This is a
 private, self-use project focused on one Mac and one iPad on a trusted local
 network.
 
-> **Current distribution status:** the repository has a `v2.0` source tag, but
-> does not currently publish a downloadable DMG or IPA through GitHub Releases.
-> Local Mac builds can be ad-hoc signed only through an explicit opt-in; a
-> public build requires an Apple-issued signing identity and notarization.
+> **Current distribution status:** `v1` includes source and a universal Mac
+> DMG signed with the owner's Apple Development identity. The DMG is a
+> non-notarized self-use build, not a general public installer. The iPad app is
+> built from Xcode with device-specific provisioning; no public IPA is shipped.
 
 ## Quick start
 
-ScreenBridge is currently source-first. You need both the Mac sender and the
+Screen Bridge is currently source-first. You need both the Mac sender and the
 iPad receiver, the same pairing code on both devices, and a local network path
 that the two devices can use.
 
 Clone the repository and enter the project directory:
 
 ```bash
-git clone https://github.com/ycl-2004/screenbridge.git
-cd screenbridge
+git clone https://github.com/ycl-2004/Screen-Bridge.git
+cd Screen-Bridge
 ```
 
 ### Mac
 
-1. Build a local test app with `ALLOW_AD_HOC=1 ./make_app.sh`, or open the
-   project in Xcode and run the Mac target.
-2. Move `ScreenBridge.app` to `/Applications` if you built the app bundle.
-3. Open ScreenBridge and save a pairing code in Settings.
+1. For the owner's registered Mac, download
+   [`Screen-Bridge-v1.dmg`](https://github.com/ycl-2004/Screen-Bridge/releases/download/v1/Screen-Bridge-v1.dmg),
+   or build from source with your own signing identity.
+2. Open the DMG and drag `Screen Bridge.app` to `/Applications`.
+3. Open Screen Bridge and save a pairing code in Settings.
 4. Keep `Use as` set to **Extended Display**.
 5. Choose `Auto`, `Require Cable`, `AWDL`, or `Wi-Fi` according to the path you
    want to use. Strict modes never silently fall back to another interface.
@@ -82,7 +85,7 @@ cd screenbridge
 - An Apple signing identity and provisioning profile for a real-device iPad
   install or a distributable build.
 
-## Why ScreenBridge
+## Why Screen Bridge
 
 - **An extended display, not an input bridge.** The iPad shows a real Mac
   virtual display. Use the Mac keyboard and trackpad to control it; iPad touch
@@ -157,7 +160,7 @@ cannot create or join a stale video session.
 
 ## Network modes
 
-ScreenBridge exposes four transport preferences:
+Screen Bridge exposes four transport preferences:
 
 - `Auto` lets Network.framework choose among the receiver's available paths.
 - `Require Cable` requires the exact wired interface on which Bonjour observed
@@ -176,7 +179,7 @@ interface, and disconnect events.
 ## Usage
 
 - Mac trackpad gestures, Mission Control, Spaces, and keyboard shortcuts remain
-  native Mac behavior. If the pointer is on the ScreenBridge display, macOS may
+  native Mac behavior. If the pointer is on the Screen Bridge display, macOS may
   show those system surfaces on the iPad just as it would on a physical monitor.
 - iPad touches and iPadOS system gestures are never sent to the Mac. The
   receiver registers only local UI gestures, such as the gesture that reveals
@@ -189,7 +192,7 @@ interface, and disconnect events.
 
 ## Screenshots
 
-Fresh ScreenBridge-branded product screenshots are not included yet. The
+Fresh Screen Bridge-branded product screenshots are not included yet. The
 checked-in simulator captures below are historical audit evidence and still
 show the old `YC Cast` product name, so they are intentionally not presented as
 current marketing screenshots:
@@ -197,7 +200,7 @@ current marketing screenshots:
 - [Historical iPad onboarding capture](docs/audits/2026-08-14-ipad-onboarding.png)
 - [Historical iPad landscape capture](docs/audits/2026-08-14-ipad-landscape.png)
 
-Capture new ScreenBridge screenshots after the app branding and real-device
+Capture new Screen Bridge screenshots after the app branding and real-device
 workflow are re-verified.
 
 ## Privacy and security
@@ -208,7 +211,7 @@ workflow are re-verified.
   starts.
 - Authenticated session keys protect receiver control messages such as
   heartbeat, keyframe, and screen-size updates.
-- ScreenBridge has no account, cloud sync, analytics, or telemetry service.
+- Screen Bridge has no account, cloud sync, analytics, or telemetry service.
 - Video and audio frames are intended for trusted local networks and are not
   independently encrypted beyond the local transport. Use a private pairing
   code and avoid untrusted networks.
@@ -217,35 +220,32 @@ workflow are re-verified.
 
 ## Current release
 
-The current repository snapshot is the annotated source tag
-[`v2.0`](https://github.com/ycl-2004/screenbridge/tree/v2.0).
-
-The tag and app bundle metadata are currently not unified: both the Mac and
-iPad app metadata still report `8.0 (build 8)`, and the packaging scripts still
-default to the historical `v8` label. This README keeps those facts separate
-until the version source of truth is corrected.
+The current release is
+[`v1`](https://github.com/ycl-2004/Screen-Bridge/releases/tag/v1). Its source,
+user-facing UI, bundle metadata, packaging defaults, release notes, and Git tag
+share one release identity.
 
 | Item | Current state |
 | --- | --- |
-| Source snapshot | `v2.0` |
-| Mac bundle metadata | `8.0 (build 8)` |
-| iPad bundle metadata | `8.0 (build 8)` |
-| Downloadable DMG/IPA | Not published in GitHub Releases |
+| Source snapshot | `v1` |
+| Mac bundle metadata | `1.0 (build 1)` |
+| iPad bundle metadata | `1.0 (build 1)` |
+| Mac release asset | `Screen-Bridge-v1.dmg`, universal, Apple Development-signed, not notarized |
+| iPad release asset | Not published; requires device-specific Xcode signing |
 | Mac local test build | `ALLOW_AD_HOC=1 ./make_app.sh` |
 | Public Mac distribution | Requires Developer ID signing and notarization |
 | iPad distribution | Requires a signed Xcode archive/export with valid provisioning |
 
-The existing [v8 release notes](docs/release-notes/v8.md) document the earlier
-ScreenBridge product-version work. Do not treat them as a replacement for the
-`v2.0` source tag until the versioning convention is unified.
+See the [v1 release notes](docs/release-notes/v1.md) for the shipped behavior
+and the verification boundary.
 
 ## FAQ
 
 <details>
-<summary>Is ScreenBridge a mirror or an extended display?</summary>
+<summary>Is Screen Bridge a mirror or an extended display?</summary>
 
 It is an extended display. The Mac creates a virtual display and the iPad
-renders that display. Drag a Mac window onto the ScreenBridge display instead
+renders that display. Drag a Mac window onto the Screen Bridge display instead
 of mirroring the built-in Mac screen.
 
 </details>
@@ -260,7 +260,7 @@ local to the Mac.
 </details>
 
 <details>
-<summary>Why does ScreenBridge ask for Screen Recording?</summary>
+<summary>Why does Screen Bridge ask for Screen Recording?</summary>
 
 The Mac must capture the virtual display before it can encode and stream it.
 Audio Recording is requested only when optional Chrome audio routing is turned
@@ -279,12 +279,12 @@ period ends the session.
 </details>
 
 <details>
-<summary>Why does the repository say v2.0 while the app says 8.0?</summary>
+<summary>Why is the Mac DMG described as self-use?</summary>
 
-The source tag was explicitly created as `v2.0`, but the app metadata and build
-scripts still use the historical `8.0` / `v8` convention. This is a known
-release-documentation issue and must be unified before the next public binary
-release.
+The v1 DMG is signed with an Apple Development certificate and is not notarized.
+That is sufficient for the owner's verified local workflow, but a general
+public installer should be signed with Developer ID, submitted to Apple's
+notary service, and have the notarization ticket stapled.
 
 </details>
 
@@ -316,8 +316,8 @@ publish its DMG; use an Apple-issued signing identity for a distributable build.
 ALLOW_AD_HOC=1 ./make_app.sh
 ```
 
-For a public-style build, supply an Apple-issued identity and notarization
-credentials:
+For a public distribution build, supply a Developer ID identity and
+notarization credentials:
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
@@ -377,28 +377,23 @@ public distribution solution.
 
 Some internal Swift package targets and source paths retain historical
 `BetterCast*` names for compatibility. The user-facing product, bundle display
-names, packaging output, and release documentation use ScreenBridge.
+names, packaging output, and release documentation use Screen Bridge.
 
 ## Versioning and releases
 
-The current source tag is `v2.0`, but the project still has three historical
-version sources that must be unified before the next release:
+The public version is `v1`. App metadata uses semantic version `1.0` with build
+number `1`; the in-app label, packaging scripts, release notes, README, and Git
+tag use `v1`. Future releases must update those sources together before tagging.
 
-- `BetterCastSender-Info.plist` and the iPad `Info.plist` report `8.0` / build
-  `8`.
-- `make_app.sh` and `package_ios_ipa.sh` default to `v8`.
-- The repository tag created for the current source snapshot is `v2.0`.
-
-The next release should choose one source of truth and update app metadata,
-packaging defaults, release notes, update-checker behavior, README badges, and
-the Git tag together. Until then, do not infer a downloadable binary version
-from the source tag alone.
+Historical `v1.0`, `v2.0`, and `v8` references describe earlier repository
+states and are not the current product release.
 
 ## Verification status
 
 The shared test suite currently covers pairing, Keychain storage, framing,
-AVCC parsing, session roles, reconnect policy, media liveness, and bounded
-video delivery. The latest local shared-suite run completed with 0 failures.
+AVCC parsing, session roles, reconnect policy, media liveness, bounded video
+delivery, timed audio packets, the sender FIFO, and receiver rebuffering. The
+v1 release run completed `102/102` tests with 0 failures.
 
 The following remain outside the current automated evidence boundary:
 
@@ -409,11 +404,13 @@ The following remain outside the current automated evidence boundary:
 
 ## Known limitations
 
-- No downloadable DMG or IPA is currently published through GitHub Releases.
+- The downloadable v1 DMG is Apple Development-signed and not notarized; it is
+  a self-use artifact, not a general public installer.
+- No public IPA is provided because iPad installation requires provisioning
+  tied to an Apple account and registered device.
 - The checked-in logo and simulator captures still use the historical `YC`
-  branding; fresh ScreenBridge-branded assets are required for public product
+  branding; fresh Screen Bridge-branded assets are required for public product
   presentation.
-- The `v2.0` source tag and the app's `8.0` / `v8` metadata are not yet unified.
 - Video and audio are designed for trusted local networks and are not
   independently encrypted end to end.
 - The source-provenance/license question tracked as K5 in
@@ -422,15 +419,15 @@ The following remain outside the current automated evidence boundary:
 
 ## License
 
-ScreenBridge is released under the [MIT License](LICENSE). The license file
+Screen Bridge is released under the [MIT License](LICENSE). The license file
 grants broad reuse, but public redistribution should still resolve the
 source-provenance evidence tracked as K5 before treating the repository as
 cleared for public distribution.
 
 ## Links
 
-- [GitHub repository](https://github.com/ycl-2004/screenbridge)
-- [Current source tag: v2.0](https://github.com/ycl-2004/screenbridge/tree/v2.0)
+- [GitHub repository](https://github.com/ycl-2004/Screen-Bridge)
+- [Current release: v1](https://github.com/ycl-2004/Screen-Bridge/releases/tag/v1)
 - [GitHub readiness notes](docs/github-readiness.md)
 - [Architecture decisions](docs/decisions)
-- [Historical release notes: v8](docs/release-notes/v8.md)
+- [Release notes: v1](docs/release-notes/v1.md)

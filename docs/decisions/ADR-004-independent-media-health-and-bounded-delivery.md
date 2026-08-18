@@ -5,7 +5,7 @@
 
 ## Context
 
-ScreenBridge previously treated any received byte as proof that the picture was
+Screen Bridge previously treated any received byte as proof that the picture was
 healthy. Audio or heartbeat traffic could therefore hide a stalled video
 decoder or renderer. Conversely, ScreenCaptureKit may emit no new complete frame
 while a desktop is visually static, so using frame arrival alone would report a

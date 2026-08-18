@@ -1,6 +1,6 @@
 import Foundation
 
-/// Constants for the ScreenBridge iOS receiver app.
+/// Constants for the Screen Bridge iOS receiver app.
 ///
 /// Deliberately small. The port, service type, and AAC format values that used
 /// to live here were never read: the listener takes its service type straight

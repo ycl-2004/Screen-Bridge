@@ -10,7 +10,7 @@ Accepted
 
 ## Context
 
-ScreenBridge's current private workflow uses the iPad as an extended display for a Mac. In practice, iPadOS system gestures such as the app switcher/home gestures remain local to the iPad, while Mac control is most predictable when the user keeps using the Mac keyboard, trackpad, mouse, and clipboard.
+Screen Bridge's current private workflow uses the iPad as an extended display for a Mac. In practice, iPadOS system gestures such as the app switcher/home gestures remain local to the iPad, while Mac control is most predictable when the user keeps using the Mac keyboard, trackpad, mouse, and clipboard.
 
 The previous design allowed authenticated iPad-originated touch, pointer, scroll, and keyboard input to be injected into macOS through Accessibility. That made the permission model heavier and blurred whether "control" belonged to the iPad or the local Mac.
 
@@ -41,6 +41,6 @@ Rejected because it leaves misleading UI and unnecessary input traffic. The rece
 
 ## Consequences
 
-- iPad gestures remain iPadOS gestures; ScreenBridge does not try to suppress system-level iPad app switching or home gestures.
-- Copy/paste is not a ScreenBridge control feature. Use the Mac clipboard for the streamed Mac display; Universal Clipboard remains an OS-level feature outside ScreenBridge.
+- iPad gestures remain iPadOS gestures; Screen Bridge does not try to suppress system-level iPad app switching or home gestures.
+- Copy/paste is not a Screen Bridge control feature. Use the Mac clipboard for the streamed Mac display; Universal Clipboard remains an OS-level feature outside Screen Bridge.
 - The security surface is smaller because the normal workflow no longer needs macOS Accessibility input injection.

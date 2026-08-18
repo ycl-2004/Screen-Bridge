@@ -15,7 +15,6 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     private var onboardingView: UIView!
     private var statusLabel: UILabel!
     private var pulseView: UIView!
-    private var disconnectedNoticeView: UIView!
     private var deviceNameField: UITextField!
     private var pairingCodeField: UITextField!
     private var isConnected = false
@@ -36,7 +35,6 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
         // 2. Setup Onboarding Screen
         setupOnboarding()
-        setupDisconnectedNotice()
 
         // 3. Setup Settings Button & Overlay
         setupSettingsButton()
@@ -242,7 +240,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
         // Title
         let titleLabel = UILabel()
-        titleLabel.text = "ScreenBridge"
+        titleLabel.text = "Screen Bridge"
         titleLabel.textColor = .white
         titleLabel.font = .systemFont(ofSize: 32, weight: .bold)
         titleLabel.textAlignment = .center
@@ -250,7 +248,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
         // Subtitle
         let subtitleLabel = UILabel()
-        subtitleLabel.text = "Display Receiver"
+        subtitleLabel.text = "iPad Display Receiver · v1"
         subtitleLabel.textColor = UIColor(red: 0.4, green: 0.6, blue: 1.0, alpha: 1.0)
         subtitleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
         subtitleLabel.textAlignment = .center
@@ -315,8 +313,8 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         instructionsLabel.translatesAutoresizingMaskIntoConstraints = false
 
         let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = 6
-        paragraphStyle.paragraphSpacing = 14
+        paragraphStyle.lineSpacing = 4
+        paragraphStyle.paragraphSpacing = 10
 
         let bodyFont = UIFont.systemFont(ofSize: 15, weight: .regular)
         let boldFont = UIFont.systemFont(ofSize: 15, weight: .semibold)
@@ -336,14 +334,11 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             .paragraphStyle: paragraphStyle
         ]
 
-        instructions.append(NSAttributedString(string: "1. Open ScreenBridge on your Mac\n", attributes: stepAttrs))
-        instructions.append(NSAttributedString(string: "The Mac app creates the extended display and streams it here.\n\n", attributes: bodyAttrs))
+        instructions.append(NSAttributedString(string: "1. Pair with your Mac\n", attributes: stepAttrs))
+        instructions.append(NSAttributedString(string: "Enter the same pairing code shown in Screen Bridge on your Mac.\n\n", attributes: bodyAttrs))
 
-        instructions.append(NSAttributedString(string: "2. Connect to the same network\n", attributes: stepAttrs))
-        instructions.append(NSAttributedString(string: "Make sure this device and your Mac are on the same Wi-Fi network.\n\n", attributes: bodyAttrs))
-
-        instructions.append(NSAttributedString(string: "3. Start streaming\n", attributes: stepAttrs))
-        instructions.append(NSAttributedString(string: "Open ScreenBridge on your Mac and select this device. Your Mac display will appear here.", attributes: bodyAttrs))
+        instructions.append(NSAttributedString(string: "2. Select this iPad\n", attributes: stepAttrs))
+        instructions.append(NSAttributedString(string: "Keep this app open, then connect from Screen Bridge on your Mac.", attributes: bodyAttrs))
 
         instructionsLabel.attributedText = instructions
 
@@ -435,7 +430,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         // constraints fully determined the width, so the max-width cap below
         // (previously .defaultHigh) was always the one broken — text ran the full
         // width of the screen, which is ~950pt on a 13" iPad.
-        onboardingCenterY = contentView.centerYAnchor.constraint(equalTo: onboardingView.centerYAnchor, constant: -20)
+        onboardingCenterY = contentView.centerYAnchor.constraint(equalTo: onboardingView.centerYAnchor, constant: -12)
         NSLayoutConstraint.activate([
             onboardingCenterY,
             contentView.centerXAnchor.constraint(equalTo: onboardingView.centerXAnchor),
@@ -458,10 +453,10 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         NSLayoutConstraint.activate([
             iconView.topAnchor.constraint(equalTo: contentView.topAnchor),
             iconView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 88),
-            iconView.heightAnchor.constraint(equalToConstant: 88),
+            iconView.widthAnchor.constraint(equalToConstant: 76),
+            iconView.heightAnchor.constraint(equalToConstant: 76),
 
-            titleLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 16),
+            titleLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 12),
             titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
 
@@ -469,16 +464,16 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             subtitleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             subtitleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
 
-            nameContainer.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 20),
+            nameContainer.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 16),
             nameContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             nameContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
 
-            divider.topAnchor.constraint(equalTo: nameContainer.bottomAnchor, constant: 20),
+            divider.topAnchor.constraint(equalTo: nameContainer.bottomAnchor, constant: 16),
             divider.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             divider.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             divider.heightAnchor.constraint(equalToConstant: 1),
 
-            instructionsLabel.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 24),
+            instructionsLabel.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 18),
             instructionsLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             instructionsLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
 
@@ -502,7 +497,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             savePairingButton.heightAnchor.constraint(equalToConstant: 44),
             pairingCodeField.bottomAnchor.constraint(equalTo: pairingContainer.bottomAnchor),
 
-            statusRow.topAnchor.constraint(equalTo: pairingContainer.bottomAnchor, constant: 20),
+            statusRow.topAnchor.constraint(equalTo: pairingContainer.bottomAnchor, constant: 16),
             statusRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             statusRow.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             statusRow.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
@@ -515,7 +510,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     private func startListenerIfPaired() {
         do {
             if try pairingSecretStore.loadSecret() != nil {
-                statusLabel?.text = "Ready. Waiting for Sender..."
+                statusLabel?.text = "Ready · Waiting for Mac…"
                 networkListener?.start()
             } else {
                 statusLabel?.text = "Enter pairing code"
@@ -551,59 +546,9 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         }
     }
 
-    private var disconnectedTitleLabel: UILabel!
-
-    private func setupDisconnectedNotice() {
-        disconnectedNoticeView = UIView()
-        disconnectedNoticeView.backgroundColor = UIColor.black.withAlphaComponent(0.78)
-        disconnectedNoticeView.layer.cornerRadius = 18
-        disconnectedNoticeView.layer.borderWidth = 1
-        disconnectedNoticeView.layer.borderColor = UIColor.white.withAlphaComponent(0.16).cgColor
-        disconnectedNoticeView.alpha = 0
-        disconnectedNoticeView.isHidden = true
-        disconnectedNoticeView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(disconnectedNoticeView)
-
-        let titleLabel = UILabel()
-        titleLabel.text = "Device disconnected"
-        titleLabel.textColor = .white
-        titleLabel.textAlignment = .center
-        titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        disconnectedTitleLabel = titleLabel
-
-        let subtitleLabel = UILabel()
-        subtitleLabel.text = "Waiting for sender..."
-        subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.58)
-        subtitleLabel.textAlignment = .center
-        subtitleLabel.font = .systemFont(ofSize: 14, weight: .medium)
-        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        disconnectedNoticeView.addSubview(titleLabel)
-        disconnectedNoticeView.addSubview(subtitleLabel)
-
-        NSLayoutConstraint.activate([
-            disconnectedNoticeView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            disconnectedNoticeView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            disconnectedNoticeView.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
-            disconnectedNoticeView.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
-            disconnectedNoticeView.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
-
-            titleLabel.topAnchor.constraint(equalTo: disconnectedNoticeView.topAnchor, constant: 22),
-            titleLabel.leadingAnchor.constraint(equalTo: disconnectedNoticeView.leadingAnchor, constant: 24),
-            titleLabel.trailingAnchor.constraint(equalTo: disconnectedNoticeView.trailingAnchor, constant: -24),
-
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
-            subtitleLabel.leadingAnchor.constraint(equalTo: disconnectedNoticeView.leadingAnchor, constant: 24),
-            subtitleLabel.trailingAnchor.constraint(equalTo: disconnectedNoticeView.trailingAnchor, constant: -24),
-            subtitleLabel.bottomAnchor.constraint(equalTo: disconnectedNoticeView.bottomAnchor, constant: -22),
-        ])
-    }
-
     private func showDisconnectedState(lost: Bool = false) {
         isConnected = false
-        disconnectedTitleLabel.text = lost ? "Connection lost" : "Device disconnected"
-        statusLabel.text = lost ? "Connection lost" : "Device disconnected"
+        statusLabel.text = lost ? "Connection lost" : "Mac disconnected"
         statusLabel.textColor = UIColor.white.withAlphaComponent(0.85)
         pulseView.layer.removeAllAnimations()
         pulseView.alpha = 1.0
@@ -614,22 +559,6 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             UIView.animate(withDuration: 0.25) {
                 self.onboardingView.alpha = 1
             }
-        }
-
-        disconnectedNoticeView.isHidden = false
-        disconnectedNoticeView.alpha = 0
-        view.bringSubviewToFront(disconnectedNoticeView)
-        UIView.animate(withDuration: 0.2) {
-            self.disconnectedNoticeView.alpha = 1
-        }
-    }
-
-    private func hideDisconnectedNotice() {
-        guard !disconnectedNoticeView.isHidden else { return }
-        UIView.animate(withDuration: 0.16) {
-            self.disconnectedNoticeView.alpha = 0
-        } completion: { _ in
-            self.disconnectedNoticeView.isHidden = true
         }
     }
 
@@ -730,7 +659,6 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         isConnected = false
         updateIdleTimer(isStreaming: false)
         renderer.clear()
-        hideDisconnectedNotice()
         statusLabel.text = "Enter pairing code"
         statusLabel.textColor = UIColor.white.withAlphaComponent(0.85)
         pulseView.layer.removeAllAnimations()
@@ -817,7 +745,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         let overlap = contentBottom + 24 - keyboardTop
 
         let duration = (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-        onboardingCenterY.constant = overlap > 0 ? -20 - overlap : -20
+        onboardingCenterY.constant = overlap > 0 ? -12 - overlap : -12
 
         UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : duration) {
             self.onboardingView.layoutIfNeeded()
@@ -825,7 +753,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     }
 
     @objc private func keyboardWillHide(_ notification: Notification) {
-        onboardingCenterY.constant = -20
+        onboardingCenterY.constant = -12
         let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
         UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : duration) {
             self.onboardingView.layoutIfNeeded()
@@ -850,6 +778,12 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
         // Keep settingsOverlay pointing to the blur view for hide/show logic
         settingsOverlay = settingsOverlayBlur
+
+        let settingsTitleLabel = UILabel()
+        settingsTitleLabel.text = "Screen Bridge v1"
+        settingsTitleLabel.textColor = UIColor.white.withAlphaComponent(0.9)
+        settingsTitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        settingsTitleLabel.textAlignment = .center
 
         // Display mode button
         displayModeButton = UIButton(type: .system)
@@ -900,9 +834,17 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         closeButton.addTarget(self, action: #selector(hideSettings), for: .touchUpInside)
         closeButton.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = UIStackView(arrangedSubviews: [displayModeButton, exportLogsButton, resetPairingButton, hideButtonButton, closeButton])
+        let stack = UIStackView(arrangedSubviews: [
+            settingsTitleLabel,
+            displayModeButton,
+            exportLogsButton,
+            resetPairingButton,
+            hideButtonButton,
+            closeButton,
+        ])
         stack.axis = .vertical
         stack.spacing = 10
+        stack.setCustomSpacing(14, after: settingsTitleLabel)
         stack.translatesAutoresizingMaskIntoConstraints = false
         settingsOverlayBlur.contentView.addSubview(stack)
 
@@ -916,6 +858,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             stack.leadingAnchor.constraint(equalTo: settingsOverlayBlur.contentView.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: settingsOverlayBlur.contentView.trailingAnchor, constant: -20),
 
+            settingsTitleLabel.heightAnchor.constraint(equalToConstant: 24),
             displayModeButton.heightAnchor.constraint(equalToConstant: 44),
             exportLogsButton.heightAnchor.constraint(equalToConstant: 44),
             resetPairingButton.heightAnchor.constraint(equalToConstant: 44),
@@ -927,7 +870,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
     private func setupShowSettingsGesture() {
         // Local-only convenience gesture. It must never compete with or delay
-        // iPadOS system gestures — ScreenBridge is display-only and registers no
+        // iPadOS system gestures — Screen Bridge is display-only and registers no
         // other recognizers.
         let threeFingerTap = UITapGestureRecognizer(target: self, action: #selector(showSettingsButton))
         threeFingerTap.numberOfTouchesRequired = 3
@@ -982,7 +925,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
     @objc private func exportDiagnostics() {
         guard let logURL = LogManager.shared.exportURL() else {
-            presentAlert(title: "No Diagnostics Yet", message: "Use ScreenBridge once, then try exporting again.")
+            presentAlert(title: "No Diagnostics Yet", message: "Use Screen Bridge once, then try exporting again.")
             return
         }
 
@@ -1000,7 +943,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
     }
 
     private func updateDisplayModeButtonTitle() {
-        displayModeButton.setTitle(renderer.isAspectFill ? "Fill Screen" : "Fit Screen", for: .normal)
+        displayModeButton.setTitle(renderer.isAspectFill ? "Display: Fill Screen" : "Display: Fit Screen", for: .normal)
     }
     
     // MARK: - NetworkListenerDelegate
@@ -1019,7 +962,6 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             showPairingRequiredState()
 
         case .connected:
-            hideDisconnectedNotice()
             // Stop pulse, show green dot, then dismiss onboarding
             pulseView.layer.removeAllAnimations()
             pulseView.alpha = 1.0

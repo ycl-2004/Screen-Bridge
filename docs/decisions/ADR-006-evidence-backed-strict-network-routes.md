@@ -13,7 +13,7 @@ when the established stream used router Wi-Fi. Discovery also discarded
 property is a list of interfaces available to the path.
 
 Sidecar's USB transport is a system feature and is not exposed as a reusable
-third-party protocol. ScreenBridge must therefore express only what Apple's
+third-party protocol. Screen Bridge must therefore express only what Apple's
 public Network.framework APIs can prove.
 
 Official API references:
@@ -25,7 +25,7 @@ Official API references:
 
 ## Decision
 
-ScreenBridge exposes four modes:
+Screen Bridge exposes four modes:
 
 - Auto allows Network.framework to select any non-loopback route.
 - Require Cable accepts only Bonjour results with a wired interface and sets

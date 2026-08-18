@@ -303,7 +303,7 @@ final class NetworkListenerIOS: @unchecked Sendable {
             // Only announce "waiting" while no session is active — the listener
             // also reports ready on restarts during a live session.
             if mainConnection == nil {
-                notifyState(.waiting, "Ready. Waiting for Sender...")
+                notifyState(.waiting, "Ready · Waiting for Mac…")
             }
         case .failed(let error):
             LogManager.shared.log("ReceiverIOS (\(type)): Failed \(error) — restarting...")
@@ -518,7 +518,7 @@ final class NetworkListenerIOS: @unchecked Sendable {
                 pendingLossNotification = false
                 notifyState(.connectionLost, "Connection lost")
             } else {
-                notifyState(.disconnected, "Device disconnected")
+                notifyState(.disconnected, "Mac disconnected")
             }
         } else if audioConnection === connection {
             audioConnection = nil

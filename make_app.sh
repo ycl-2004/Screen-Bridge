@@ -3,7 +3,7 @@
 # Exit on error
 set -e
 
-VERSION="v8"
+VERSION="${VERSION:-v1}"
 
 # A stable Apple-issued signature is required for a distributable build. An
 # ad-hoc identity can change how macOS tracks Local Network permission between
@@ -35,7 +35,7 @@ APP_PASSWORD="${APP_PASSWORD:-}"
 TEAM_ID="${TEAM_ID:-}"
 
 echo "============================================"
-echo "  Building ScreenBridge $VERSION (Universal Binary)"
+echo "  Building Screen Bridge $VERSION (Universal Binary)"
 echo "============================================"
 if [ "$SIGN_IDENTITY" = "-" ]; then
     echo "WARNING: creating an ad-hoc signed local-test build."
@@ -45,22 +45,22 @@ swift build -c release --arch arm64 --arch x86_64
 
 # Define Paths
 BUILD_DIR=".build/apple/Products/Release"
-APP_NAME="ScreenBridge.app"
-DMG_NAME="ScreenBridge.dmg"
+APP_NAME="Screen Bridge.app"
+DMG_NAME="Screen-Bridge-${VERSION}.dmg"
 DMG_STAGING="dmg_staging"
 
 # Clean old artifacts
-rm -rf "$APP_NAME" "BetterCast.app" "PrivateBetterCast.app" "BetterCastSender.app" "$DMG_STAGING" "$DMG_NAME" "BetterCast.dmg"
+rm -rf "$APP_NAME" "ScreenBridge.app" "BetterCast.app" "PrivateBetterCast.app" "BetterCastSender.app" "$DMG_STAGING" "$DMG_NAME" "Screen Bridge.dmg" "ScreenBridge.dmg" "BetterCast.dmg"
 
 # ============================================
-# ScreenBridge App (unified sender + receiver)
+# Screen Bridge App (unified sender + receiver)
 # ============================================
 echo "Creating $APP_NAME..."
 mkdir -p "$APP_NAME/Contents/MacOS"
 mkdir -p "$APP_NAME/Contents/Resources"
 # Keep the internal Swift package target name for compatibility, but expose the
-# product executable under the public ScreenBridge name.
-cp "$BUILD_DIR/BetterCastSender" "$APP_NAME/Contents/MacOS/ScreenBridge"
+# product executable under the public Screen Bridge name.
+cp "$BUILD_DIR/BetterCastSender" "$APP_NAME/Contents/MacOS/Screen Bridge"
 cp "BetterCastSender-Info.plist" "$APP_NAME/Contents/Info.plist"
 cp "assets/branding/BetterCastIcon.icns" "$APP_NAME/Contents/Resources/AppIcon.icns"
 
@@ -81,7 +81,7 @@ cp -R "$APP_NAME" "$DMG_STAGING/"
 ln -s /Applications "$DMG_STAGING/Applications"
 
 # Create DMG from staging folder
-hdiutil create -volname "ScreenBridge" \
+hdiutil create -volname "Screen Bridge $VERSION" \
     -srcfolder "$DMG_STAGING" \
     -ov -format UDZO \
     "$DMG_NAME"
@@ -122,6 +122,6 @@ echo "DMG:"
 echo "  - $DMG_NAME"
 echo ""
 echo "Installation:"
-echo "  1. Open the DMG and drag ScreenBridge to Applications"
+echo "  1. Open the DMG and drag Screen Bridge to Applications"
 echo "  2. Grant Screen Recording permission when prompted"
 echo "  3. Control the extended display from the Mac keyboard, trackpad, mouse, and clipboard"
