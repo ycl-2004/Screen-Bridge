@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import Security
 
-public enum PairingAuthError: Error, Equatable {
+public enum PairingAuthError: Error, Equatable, Sendable {
     case invalidProof
     case invalidEnvelope
 }
@@ -31,7 +31,7 @@ public struct ReceiverCapabilities: Codable, Equatable, Sendable {
     }
 }
 
-public struct SenderHello: Codable, Equatable {
+public struct SenderHello: Codable, Equatable, Sendable {
     public let version: UInt8
     public let senderNonce: Data
     public let role: StreamConnectionRole
@@ -52,7 +52,7 @@ public struct SenderHello: Codable, Equatable {
     }
 }
 
-public struct ReceiverHello: Codable, Equatable {
+public struct ReceiverHello: Codable, Equatable, Sendable {
     public let receiverNonce: Data
     public let receiverProof: Data
     public let sessionID: UUID
@@ -71,7 +71,7 @@ public struct ReceiverHello: Codable, Equatable {
     }
 }
 
-public struct SenderProof: Codable, Equatable {
+public struct SenderProof: Codable, Equatable, Sendable {
     public let senderProof: Data
 
     public init(senderProof: Data) {
@@ -79,7 +79,7 @@ public struct SenderProof: Codable, Equatable {
     }
 }
 
-public struct AuthenticatedEnvelope: Codable, Equatable {
+public struct AuthenticatedEnvelope: Codable, Equatable, Sendable {
     public let sequence: UInt64
     public let payload: Data
     public let mac: Data

@@ -3,6 +3,7 @@ import UIKit
 import AVFoundation
 
 // Just a protocol to match what NetworkListenerIOS expects
+@MainActor
 protocol VideoRendererIOS: AnyObject {
     @discardableResult
     func enqueue(_ sampleBuffer: CMSampleBuffer) -> Bool

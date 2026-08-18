@@ -1,6 +1,6 @@
 import SwiftUI
 
-class LogManager: ObservableObject {
+final class LogManager: ObservableObject, @unchecked Sendable {
     static let shared = LogManager()
     @Published var logs: [String] = []
 
@@ -50,40 +50,22 @@ class LogManager: ObservableObject {
     }
 }
 
-// MARK: - Update Checker
+// MARK: - App Version
 
-class UpdateChecker: ObservableObject {
-    static let shared = UpdateChecker()
-
-    /// Reads version from Info.plist (CFBundleShortVersionString), prefixed with "v"
-    static var currentVersion: String {
+/// Version string shown in the About section.
+///
+/// This used to be an update checker, but the check itself never did anything —
+/// `checkForUpdates()` only set two flags to false, and nothing read the
+/// published properties. Only the version string was ever used, so that is all
+/// that remains. Reintroduce the checking machinery alongside a real update
+/// mechanism, not before it.
+enum AppVersion {
+    /// Reads version from Info.plist (CFBundleShortVersionString), prefixed with "v".
+    static var current: String {
         let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         // Extract major version number to match GitHub tag format (e.g., "8.0" → "v8")
         let major = short.components(separatedBy: ".").first ?? short
         return "v\(major)"
-    }
-
-    static var displayVersion: String {
-        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
-        return "\(short) (\(build))"
-    }
-
-    @Published var latestVersion: String?
-    @Published var downloadURL: String?
-    @Published var releaseNotes: String?
-    @Published var updateAvailable = false
-    @Published var checkedOnce = false
-
-    /// Extracts the leading integer from a version tag like "v8", "V7", "v10.2" → 8, 7, 10
-    static func versionNumber(from tag: String) -> Int {
-        let digits = tag.drop(while: { !$0.isNumber })
-        return Int(digits.prefix(while: { $0.isNumber })) ?? 0
-    }
-
-    func checkForUpdates() {
-        checkedOnce = true
-        updateAvailable = false
     }
 }
 
@@ -98,7 +80,7 @@ struct Changelog {
     }
 
     static let entries: [Entry] = [
-        Entry(version: UpdateChecker.currentVersion, date: "2026-05-11", highlights: [
+        Entry(version: AppVersion.current, date: "2026-05-11", highlights: [
             "iPad default display mode is Best Fit: 1344 x 934 HiDPI with native capture",
             "iPad receiver opens in Fit Screen mode and requires full screen",
             "Mac and iPad app icons are aligned for the private build",

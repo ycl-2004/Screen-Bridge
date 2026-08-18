@@ -1,15 +1,5 @@
 import Foundation
 
-/// What to do after a connection attempt times out.
-public enum ConnectionRetryDecision: Equatable {
-    /// Dial again as `attempt`, after waiting `afterSeconds`.
-    case retry(attempt: Int, afterSeconds: TimeInterval)
-    /// Give up on the selected interface and dial over plain infrastructure.
-    case fallBackToInfrastructure
-    /// Stop and report failure to the user.
-    case fail
-}
-
 /// What the back-off timer should do when it finally fires.
 public enum ConnectionBackoffOutcome: Equatable {
     /// Another code path already released the reservation; this chain is stale.
@@ -30,26 +20,13 @@ public enum ConnectionBackoffOutcome: Equatable {
 /// the two chains together flooded the receiver's pending-handshake limit so a
 /// cable that works on a single dial could never connect.
 public enum ConnectionRetryPolicy {
-    /// Cold USB/Thunderbolt and AWDL links routinely refuse the first dial while
-    /// the interface is still coming up; three dials is the observed worst case.
-    public static let maximumAttempts = 4
+    /// AWDL radios sleep and need waking, so a cold peer-to-peer dial genuinely
+    /// can fail once or twice before succeeding.
+    public static let maximumAWDLAttempts = 4
 
     /// Pause between warm-up retries, so the receiver can retire the handshake
     /// we just cancelled before the next dial arrives.
     public static let backoffSeconds: TimeInterval = 1.5
-
-    public static func decision(
-        attempt: Int,
-        canFallBackToInfrastructure: Bool
-    ) -> ConnectionRetryDecision {
-        if canFallBackToInfrastructure {
-            return .fallBackToInfrastructure
-        }
-        if attempt < maximumAttempts {
-            return .retry(attempt: attempt + 1, afterSeconds: backoffSeconds)
-        }
-        return .fail
-    }
 
     /// Whether a `connect` call may proceed.
     ///

@@ -25,9 +25,6 @@ public enum StreamFraming {
     /// Control messages are authenticated envelopes wrapping a small event.
     public static let maxControlFrameBytes = 64 * 1024
 
-    /// One AAC access unit plus envelope overhead.
-    public static let maxAudioFrameBytes = 1 * 1024 * 1024
-
     /// One coalesced H.264 access unit. A 4K keyframe at high bitrate stays far
     /// below this; the limit exists to bound the worst case, not to shape traffic.
     public static let maxVideoFrameBytes = 16 * 1024 * 1024

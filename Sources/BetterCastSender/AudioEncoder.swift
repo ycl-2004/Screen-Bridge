@@ -1,13 +1,13 @@
 import Foundation
 import AVFoundation
-import AudioToolbox
-import CoreMedia
+@preconcurrency import AudioToolbox
+@preconcurrency import CoreMedia
 
 protocol AudioEncoderDelegate: AnyObject {
     func audioEncoder(_ encoder: AudioEncoder, didEncode data: Data, for connectionId: UUID)
 }
 
-class AudioEncoder {
+final class AudioEncoder: @unchecked Sendable {
     weak var delegate: AudioEncoderDelegate?
     let connectionId: UUID
 

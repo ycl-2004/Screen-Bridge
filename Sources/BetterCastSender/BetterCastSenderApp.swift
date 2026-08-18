@@ -1,5 +1,6 @@
 import SwiftUI
-import Network
+@preconcurrency import Network
+@preconcurrency import Dispatch
 import Security
 import ScreenCaptureKit
 import IOKit.graphics
@@ -40,7 +41,6 @@ struct BetterCastSenderApp: App {
 
     enum SidebarSelection: Hashable {
         case devices
-        case receive
         case settings
         case device(UUID)
         case discovered(String) // Unconnected device by service name
@@ -94,7 +94,8 @@ struct BetterCastSenderApp: App {
 // MARK: - Tour Anchor Store (global coordinates)
 
 /// Stores sidebar item frames in global coordinate space for the tour spotlight.
-class TourAnchorStore: ObservableObject {
+@MainActor
+final class TourAnchorStore: ObservableObject {
     static let shared = TourAnchorStore()
     @Published var globalFrames: [String: CGRect] = [:]
     @Published var overlayOrigin: CGPoint = .zero
@@ -369,7 +370,6 @@ struct OnboardingView: View {
 
     @State private var currentStep = 0
     @State private var screenRecordingGranted = false
-    @State private var pollTimer: Timer?
 
     /// Screen Recording is the only permission this app needs. There used to be a
     /// "Local Control" step here, left over from a version that required
@@ -474,10 +474,12 @@ struct OnboardingView: View {
         }
         .onAppear {
             checkPermissions()
-            startPolling()
         }
-        .onDisappear {
-            pollTimer?.invalidate()
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                pollPermissions()
+            }
         }
     }
 
@@ -565,14 +567,12 @@ struct OnboardingView: View {
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
     }
 
-    private func startPolling() {
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
-            checkPermissions()
-            // Advance once the permission the user just went to grant comes back.
-            if currentStep == 0 && screenRecordingGranted {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    currentStep = 1
-                }
+    private func pollPermissions() {
+        checkPermissions()
+        // Advance once the permission the user just went to grant comes back.
+        if currentStep == 0 && screenRecordingGranted {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                currentStep = 1
             }
         }
     }
@@ -727,35 +727,28 @@ struct SidebarView: View {
                 } else {
                     ForEach(client.foundServices.filter { service in
                         let serviceKey = canonicalDeviceName(service.name)
-                        let isADBSynthetic = service.name.contains("Android (USB)") || service.name.contains("Android (WiFi ADB)")
-                        let hasMDNSAndroid = client.foundServices.contains(where: {
-                            $0.name.lowercased().contains("android") && !$0.name.contains("Android (USB)") && !$0.name.contains("Android (WiFi ADB)")
-                        })
                         // Hide " P2P" entry when base device exists (merged into one entry)
                         let isP2PDuplicate = service.name.hasSuffix(" P2P")
                             && client.foundServices.contains(where: { canonicalDeviceName($0.name) == serviceKey && $0.name != service.name })
                         let duplicateDiscovered = client.foundServices.contains(where: {
                             canonicalDeviceName($0.name) == serviceKey && $0.name < service.name
                         })
-                        return !(isADBSynthetic && hasMDNSAndroid) && !isP2PDuplicate && !duplicateDiscovered
+                        return !isP2PDuplicate && !duplicateDiscovered
                     }, id: \.name) { service in
                         SidebarDeviceRow(service: service, client: client, selection: $selection)
                     }
                 }
 
-                // Connected ADB tunnels not in foundServices
                 ForEach(client.connectedDisplays.filter { display in
                     let displayKey = canonicalDeviceName(display.name)
                     let inFoundServices = client.foundServices.contains(where: { canonicalDeviceName($0.name) == displayKey })
-                    let isADBDuplicate = (display.name.contains("Android (USB)") || display.name.contains("Android (WiFi ADB)"))
-                        && client.foundServices.contains(where: { $0.name.lowercased().contains("android") })
                     // Hide " P2P" connected entry when base device is also connected
                     let isP2PConnected = display.name.hasSuffix(" P2P")
                         && client.connectedDisplays.contains(where: { canonicalDeviceName($0.name) == displayKey && $0.name != display.name })
                     let duplicateConnected = client.connectedDisplays.contains(where: {
                         canonicalDeviceName($0.name) == displayKey && $0.name < display.name
                     })
-                    return !inFoundServices && !isADBDuplicate && !isP2PConnected && !duplicateConnected
+                    return !inFoundServices && !isP2PConnected && !duplicateConnected
                 }) { display in
                     sidebarRow(display.name, subtitle: display.resolution, icon: "display", tag: .device(display.id), iconTint: .green)
                 }
@@ -868,57 +861,18 @@ struct SidebarDeviceRow: View {
     @ObservedObject var client: NetworkClient
     @Binding var selection: BetterCastSenderApp.SidebarSelection?
 
-    private var isAndroid: Bool {
-        service.name.lowercased().contains("android")
-    }
-
-    /// Connected directly (same service name) or via ADB tunnel
     private var isConnected: Bool {
         let serviceKey = canonicalDeviceName(service.name)
-        if client.connectedServices.contains(where: { canonicalDeviceName($0.name) == serviceKey }) { return true }
-        // Android: also count ADB tunnel connections
-        if isAndroid {
-            return client.connectedDisplays.contains(where: {
-                $0.name.contains("Android (USB)") || $0.name.contains("Android (WiFi ADB)")
-            })
-        }
-        return false
+        return client.connectedServices.contains(where: { canonicalDeviceName($0.name) == serviceKey })
     }
 
-    /// Find the connected display ID for this device (direct or ADB)
     private var connectedDisplayId: UUID? {
         let serviceKey = canonicalDeviceName(service.name)
-        if let display = client.connectedDisplays.first(where: { canonicalDeviceName($0.name) == serviceKey }) {
-            return display.id
-        }
-        if isAndroid {
-            return client.connectedDisplays.first(where: {
-                $0.name.contains("Android (USB)") || $0.name.contains("Android (WiFi ADB)")
-            })?.id
-        }
-        return nil
-    }
-
-    /// Connection method label for connected Android devices
-    private var connectionMethod: String {
-        if client.connectedDisplays.contains(where: { $0.name.contains("Android (USB)") }) {
-            return "Connected (USB)"
-        }
-        if client.connectedDisplays.contains(where: { $0.name.contains("Android (WiFi ADB)") }) {
-            return "Connected (WiFi ADB)"
-        }
-        let serviceKey = canonicalDeviceName(service.name)
-        if client.connectedServices.contains(where: { canonicalDeviceName($0.name) == serviceKey }) {
-            return "Connected (WiFi)"
-        }
-        return "Available"
+        return client.connectedDisplays.first(where: { canonicalDeviceName($0.name) == serviceKey })?.id
     }
 
     private var deviceIcon: String {
         if isConnected { return "display" }
-        if isAndroid { return "apps.iphone" }
-        if service.name.lowercased().contains("windows") { return "pc" }
-        if service.name.lowercased().contains("linux") { return "desktopcomputer" }
         return "display"
     }
 
@@ -939,7 +893,7 @@ struct SidebarDeviceRow: View {
                     VStack(alignment: .leading) {
                         Text(service.name)
                             .lineLimit(1)
-                        Text(isAndroid ? connectionMethod : (isConnected ? "Connected" : "Available"))
+                        Text(isConnected ? "Connected" : "Available")
                             .font(.caption)
                             .foregroundStyle(isConnected ? .green : .secondary)
                     }
@@ -949,7 +903,7 @@ struct SidebarDeviceRow: View {
                 }
                 .foregroundColor(isSelected ? .accentColor : .primary)
                 Spacer()
-                if !isConnected && !isAndroid {
+                if !isConnected {
                     if client.isConnecting(to: service) {
                         ProgressView()
                             .controlSize(.mini)
@@ -981,68 +935,6 @@ struct SidebarDeviceRow: View {
                 ? RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.1))
                 : nil
         )
-    }
-}
-
-// MARK: - Manual Connect Row
-
-struct ManualConnectRow: View {
-    @ObservedObject var client: NetworkClient
-    @State private var expanded = false
-
-    var body: some View {
-        DisclosureGroup("Manual IP", isExpanded: $expanded) {
-            VStack(spacing: 8) {
-                TextField("IP / hostname", text: $client.manualHost)
-                    .textFieldStyle(.roundedBorder)
-                HStack {
-                    TextField("Port", text: $client.manualPort)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                    Button("Connect") {
-                        client.connectManual()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(client.manualHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
-    }
-}
-
-// MARK: - ADB Connect Row
-
-struct ADBConnectRow: View {
-    @ObservedObject var client: NetworkClient
-    @State private var expanded = false
-
-    var body: some View {
-        DisclosureGroup("Android (ADB)", isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Button(client.adbInProgress ? "Setting up..." : "Wireless") {
-                        client.connectADBWireless()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .tint(.green)
-                    .disabled(client.adbInProgress)
-
-                    Button("USB") {
-                        client.connectADBUSB()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .tint(.blue)
-                }
-                if !client.adbStatus.isEmpty {
-                    Text(client.adbStatus)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
     }
 }
 
@@ -1120,17 +1012,6 @@ struct DetailPanelView: View {
             } else {
                 settingsForm
             }
-        case .receive:
-            VStack(spacing: 12) {
-                Image(systemName: "lock.shield")
-                    .font(.system(size: 42, weight: .light))
-                    .foregroundStyle(.secondary)
-                Text("Receiver Mode Disabled")
-                    .font(.title3.bold())
-                Text("This private build only sends from Mac to a paired iPad.")
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .logs:
             LogView()
                 .navigationTitle("Logs")
@@ -1316,10 +1197,10 @@ struct DetailPanelView: View {
                 HStack {
                     Picker("Mode", selection: $client.interfacePreference) {
                         ForEach(NetworkInterfacePreference.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
+                            Text(mode.label).tag(mode)
                         }
                     }
-                    InfoTip(text: "Controls the network path for new connections: Auto can fall back, P2P forces Apple direct link, Router uses Wi-Fi, Cable prefers wired networking.")
+                    InfoTip(text: "Auto lets the system choose. Require Cable, AWDL, and Wi-Fi require Bonjour evidence for that exact interface and never fall back to another route.")
                 }
 
                 HStack {
@@ -1454,7 +1335,7 @@ struct DetailPanelView: View {
             // About & Changelog
             Section("About") {
                 LabeledContent("Build") {
-                    Text("ScreenBridge \(UpdateChecker.currentVersion)")
+                    Text("ScreenBridge \(AppVersion.current)")
                         .foregroundStyle(.secondary)
                 }
 
@@ -1528,9 +1409,7 @@ struct DetailPanelView: View {
 
     private func deviceIcon(for service: DiscoveredService) -> String {
         let name = service.name.lowercased()
-        if name.contains("android") { return "apps.iphone" }
-        if name.contains("windows") { return "pc" }
-        if name.contains("linux") { return "desktopcomputer" }
+        if name.contains("ipad") || name.contains("ios") { return "ipad" }
         return "display"
     }
 
@@ -1646,7 +1525,11 @@ struct DisplayItem: Identifiable {
 }
 
 /// Captures periodic screenshots for all active displays.
-class DisplayThumbnailProvider: ObservableObject {
+private struct DisplayThumbnailSnapshot: @unchecked Sendable {
+    let images: [String: NSImage]
+}
+
+final class DisplayThumbnailProvider: ObservableObject, @unchecked Sendable {
     @Published var thumbnails: [String: NSImage] = [:] // keyed by DisplayItem.id
     private var timer: Timer?
 
@@ -1693,8 +1576,9 @@ class DisplayThumbnailProvider: ObservableObject {
                 }
             }
 
-            DispatchQueue.main.async {
-                self?.thumbnails = newThumbs
+            let snapshot = DisplayThumbnailSnapshot(images: newThumbs)
+            DispatchQueue.main.async { [weak self] in
+                self?.thumbnails = snapshot.images
             }
         }
     }
@@ -2060,10 +1944,7 @@ struct DisplayOverviewView: View {
 
     private func deviceIcon(for name: String) -> String {
         let lower = name.lowercased()
-        if lower.contains("android") { return "apps.iphone" }
         if lower.contains("ipad") || lower.contains("ios") { return "ipad" }
-        if lower.contains("windows") { return "pc" }
-        if lower.contains("linux") { return "desktopcomputer" }
         return "display"
     }
 }
@@ -2145,6 +2026,23 @@ struct DeviceDetailView: View {
                     }
                 }
 
+                LabeledContent("Requested Route") {
+                    Text(display.requestedRoute)
+                }
+
+                LabeledContent("System Path") {
+                    Text(display.systemPath)
+                        .font(.system(.body, design: .monospaced))
+                }
+
+                LabeledContent("Route Evidence") {
+                    Label(
+                        display.routeEvidence,
+                        systemImage: display.hasVerifiedRouteEvidence ? "checkmark.seal.fill" : "questionmark.circle"
+                    )
+                    .foregroundStyle(display.hasVerifiedRouteEvidence ? .green : .secondary)
+                }
+
                 LabeledContent("Transfer Speed") {
                     Text(client.transferRate)
                         .font(.system(.body, design: .monospaced))
@@ -2184,20 +2082,9 @@ struct DiscoveredDeviceView: View {
     @ObservedObject var client: NetworkClient
     @Binding var selection: BetterCastSenderApp.SidebarSelection?
 
-    private var isAndroid: Bool {
-        service.name.lowercased().contains("android")
-    }
-
-    /// Check if this device is connected via any method (direct or ADB)
     private var connectedDisplay: ConnectedDisplayInfo? {
         let serviceKey = canonicalDeviceName(service.name)
-        if let d = client.connectedDisplays.first(where: { canonicalDeviceName($0.name) == serviceKey }) { return d }
-        if isAndroid {
-            return client.connectedDisplays.first(where: {
-                $0.name.contains("Android (USB)") || $0.name.contains("Android (WiFi ADB)")
-            })
-        }
-        return nil
+        return client.connectedDisplays.first(where: { canonicalDeviceName($0.name) == serviceKey })
     }
 
     var body: some View {
@@ -2213,54 +2100,13 @@ struct DiscoveredDeviceView: View {
     private var connectForm: some View {
         Form {
             Section("Connect") {
-                if isAndroid {
-                    HStack {
-                        Image(systemName: "cable.connector")
-                            .foregroundStyle(.secondary)
-                        VStack(alignment: .leading) {
-                            Text("ADB (USB)")
-                                .fontWeight(.medium)
-                            Text("60 FPS — best quality, requires USB cable")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Connect") {
-                            client.connectADBUSB()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        InfoTip(text: "Uses Android Debug Bridge over USB. Best Android quality, no Wi-Fi path required.")
-                    }
-
-                    HStack {
-                        Image(systemName: "wifi")
-                            .foregroundStyle(.secondary)
-                        VStack(alignment: .leading) {
-                            Text("ADB (WiFi)")
-                                .fontWeight(.medium)
-                            Text("60 FPS — wireless ADB tunnel, needs USB first")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Connect") {
-                            client.connectADBWireless()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .disabled(client.adbInProgress)
-                        InfoTip(text: "Uses a wireless ADB tunnel. Pair once over USB first, then continue over Wi-Fi.")
-                    }
-                }
-
                 HStack {
                     Image(systemName: "network")
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading) {
-                        Text("WiFi (TCP)")
+                        Text("Connect")
                             .fontWeight(.medium)
-                        Text(isAndroid ? "30 FPS — direct network, no ADB needed" : "Connect via network")
+                        Text("Use the selected network mode")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -2271,15 +2117,7 @@ struct DiscoveredDeviceView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .disabled(client.isConnecting(to: service))
-                    InfoTip(text: isAndroid ? "Connects over Wi-Fi without ADB. Easier setup, usually lower quality than USB." : "Connects over local network. Apple receivers use direct AWDL when the selected mode allows it.")
-                }
-            }
-
-            if isAndroid && !client.adbStatus.isEmpty {
-                Section("ADB Status") {
-                    Text(client.adbStatus)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    InfoTip(text: "Strict modes connect only when Bonjour observed this receiver on the requested interface. Auto lets the system choose.")
                 }
             }
 
@@ -2398,21 +2236,6 @@ struct InfoTip: View {
 
 // MARK: - Settings Row
 
-struct SettingsRow<Content: View>: View {
-    let label: String
-    @ViewBuilder let content: Content
-
-    var body: some View {
-        HStack {
-            Text(label)
-                .font(.system(size: 13))
-                .foregroundStyle(.primary)
-            Spacer()
-            content
-        }
-    }
-}
-
 // MARK: - Connected Display Info
 
 enum AudioStreamingState: String, Equatable {
@@ -2462,12 +2285,66 @@ struct ConnectedDisplayInfo: Identifiable {
     var audioEnabled: Bool
     var audioState: AudioStreamingState
     var cgDisplayID: CGDirectDisplayID? = nil
+    /// The route requested when this connection was created.
+    var requestedRoute: String = NetworkInterfacePreference.auto.label
+    /// Network.framework's path-type report. Wi-Fi and AWDL share the `.wifi`
+    /// type, so this deliberately does not pretend to identify the radio.
+    var systemPath: String = "Unknown"
+    /// Concrete discovery/connection evidence, when a strict mode required a
+    /// specific Bonjour interface.
+    var routeEvidence: String = "System selected; no physical-interface proof"
+    var hasVerifiedRouteEvidence = false
 }
 
 struct DiscoveredService: Identifiable {
     let id = UUID()
     let name: String
     let endpoint: NWEndpoint
+    /// Interfaces on which NWBrowser observed this exact Bonjour result.
+    /// Source: NWBrowser.Result.interfaces in Network.framework.
+    let interfaces: [NWInterface]
+
+    init(name: String, endpoint: NWEndpoint, interfaces: [NWInterface] = []) {
+        self.name = name
+        self.endpoint = endpoint
+        self.interfaces = interfaces
+    }
+
+    var interfaceSummary: String {
+        guard !interfaces.isEmpty else { return "No interface evidence" }
+        return interfaces.map { "\($0.name)[\($0.type)]" }.joined(separator: ", ")
+    }
+
+    func requiredInterface(for preference: NetworkInterfacePreference) -> NWInterface? {
+        switch preference {
+        case .auto:
+            return nil
+        case .requireCable:
+            return interfaces.first(where: Self.isWiredInterface)
+        case .awdl:
+            return interfaces.first(where: Self.isAWDLInterface)
+        case .wifi:
+            return interfaces.first(where: Self.isInfrastructureWiFiInterface)
+        }
+    }
+
+    func isVisible(in preference: NetworkInterfacePreference) -> Bool {
+        preference == .auto || requiredInterface(for: preference) != nil
+    }
+
+    private static func isAWDLInterface(_ interface: NWInterface) -> Bool {
+        interface.name.hasPrefix("awdl") || interface.name.hasPrefix("llw")
+    }
+
+    private static func isInfrastructureWiFiInterface(_ interface: NWInterface) -> Bool {
+        interface.type == .wifi && !isAWDLInterface(interface)
+    }
+
+    private static func isWiredInterface(_ interface: NWInterface) -> Bool {
+        if interface.type == .wiredEthernet { return true }
+        guard interface.type == .other else { return false }
+        return interface.name.hasPrefix("en") || interface.name.hasPrefix("bridge")
+    }
 }
 
 private func canonicalDeviceName(_ name: String) -> String {
@@ -2510,12 +2387,32 @@ enum StreamQuality: Int, CaseIterable, Identifiable {
 }
 
 enum NetworkInterfacePreference: String, CaseIterable, Identifiable {
-    case auto = "Auto (Apple Default)"
-    case p2pOnly = "Force P2P (WiFi Direct)"
-    case routerOnly = "Force Router/WiFi"
-    case wiredCable = "USB / Thunderbolt Cable"
+    case auto
+    case requireCable
+    case awdl
+    case wifi
 
     var id: String { self.rawValue }
+
+    var label: String {
+        switch self {
+        case .auto: return "Auto"
+        case .requireCable: return "Require Cable"
+        case .awdl: return "AWDL"
+        case .wifi: return "Wi-Fi"
+        }
+    }
+
+    static func restored(from storedValue: String) -> Self? {
+        if let current = Self(rawValue: storedValue) { return current }
+        switch storedValue {
+        case "Auto (Apple Default)": return .auto
+        case "USB / Thunderbolt Cable": return .requireCable
+        case "Force P2P (WiFi Direct)": return .awdl
+        case "Force Router/WiFi": return .wifi
+        default: return nil
+        }
+    }
 }
 
 /// The route we explicitly asked Network.framework to establish. NWPath's
@@ -2525,18 +2422,15 @@ private enum ConnectionRouteIntent: Equatable {
     case automatic
     case peerToPeer
     case infrastructure
-    case loopback
     case wired
 }
 
 private struct ConnectionRouteClassification {
     let isP2P: Bool
-    let isLoopback: Bool
     let isWiredCable: Bool
 
     var description: String {
         if isP2P { return "P2P Direct Link (AWDL)" }
-        if isLoopback { return "Loopback/ADB tunnel" }
         if isWiredCable { return "Wired/cable link" }
         return "Router/infrastructure link"
     }
@@ -2577,13 +2471,17 @@ struct ConnectionPipeline {
 
     // Adaptive: P2P (AWDL) connections get full quality; infrastructure gets throttled
     var isP2P: Bool = false
-    // Loopback connections (ADB tunnel via lo0) — high bandwidth, skip backpressure
-    var isLoopback: Bool = false
     // USB-C / Thunderbolt / Ethernet-style direct links — higher bandwidth than router Wi-Fi
     var isWiredCable: Bool = false
-    // TCP backpressure: at most one video packet is in Network.framework and
-    // one recovery keyframe is retained. This bound applies to every route,
-    // including P2P, wired, and loopback.
+    var requestedPreference: NetworkInterfacePreference = .auto
+    var requiredRouteInterface: NWInterface?
+    // TCP backpressure is bounded per route and retains at most one recovery
+    // keyframe; see VideoFlightWindowPolicy.
+    var requestedRoute: String = NetworkInterfacePreference.auto.label
+    var systemPath: String = "Unknown"
+    var routeEvidence: String = "System selected; no physical-interface proof"
+    var hasVerifiedRouteEvidence = false
+
     /// Frames handed to the transport but not yet reported complete.
     /// Counted rather than flagged so reliable links can keep several frames in
     /// flight instead of one per round trip.
@@ -2601,10 +2499,6 @@ struct ConnectionPipeline {
     /// When the current capture pipeline started streaming, used to ignore
     /// start-up burst congestion when adapting the bitrate.
     var streamingStartedAt: Date = Date()
-    // WiFi ADB vs USB ADB — WiFi has much less bandwidth, needs throttling
-    var isWiFiADB: Bool = false
-    // ADB/localhost connections always use TCP framing regardless of global protocol setting
-    var forceTCP: Bool = false
     // iOS/Mac Swift receivers don't strip the type byte — send raw payloads for them
     var supportsTypeByte: Bool = true
     // Receiver-reported screen dimensions (pixels) — used to match aspect ratio
@@ -2665,7 +2559,7 @@ private enum PairingTransportError: LocalizedError {
     }
 }
 
-private struct AuthenticatedPairing {
+private struct AuthenticatedPairing: Sendable {
     let sessionKey: Data
     let receiverSessionID: UUID
     let receiverCapabilities: ReceiverCapabilities?
@@ -2676,7 +2570,7 @@ private struct AuthenticatedPairing {
 /// Handshake completions can be reached from the Network queue and from a
 /// timeout scheduled on main. Without this, a late reply after a timeout would
 /// deliver a second result for the same attempt.
-private final class SingleCompletionGuard {
+private final class SingleCompletionGuard: @unchecked Sendable {
     private let lock = NSLock()
     private var claimed = false
 
@@ -2687,6 +2581,13 @@ private final class SingleCompletionGuard {
         claimed = true
         return true
     }
+}
+
+/// Mutable attempt state is touched only by callbacks delivered on the main
+/// queue. A reference box avoids capturing a mutable local across Sendable
+/// callback boundaries while preserving that single-queue ownership.
+private final class ConnectionAttemptState: @unchecked Sendable {
+    var isSettled = false
 }
 
 /// Single source of truth for the sender's connection lifecycle.
@@ -2706,7 +2607,7 @@ enum ConnectionPhase: String, Equatable {
     }
 }
 
-class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegate, ScreenRecorderDelegate {
+final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegate, ScreenRecorderDelegate, @unchecked Sendable {
     private static let displayPlacementDefaultsKey = "displayPlacement"
     private static let hiddenDeviceKeysDefaultsKey = "hiddenDeviceKeys"
 
@@ -2758,27 +2659,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
     @Published var connectedDisplays: [ConnectedDisplayInfo] = [] // Per-device display info
 
-    // Input event deduplication (receiver sends critical events 3x over UDP for reliability)
-    private var recentEventIds: Set<UInt64> = []
-    private var recentEventIdQueue: [UInt64] = [] // FIFO to cap set size
-    private let maxRecentEvents = 200
 
-    private func isDuplicateEvent(_ eventId: UInt64) -> Bool {
-        if recentEventIds.contains(eventId) {
-            return true
-        }
-        recentEventIds.insert(eventId)
-        recentEventIdQueue.append(eventId)
-        if recentEventIdQueue.count > maxRecentEvents {
-            let old = recentEventIdQueue.removeFirst()
-            recentEventIds.remove(old)
-        }
-        return false
-    }
-
-    // Fragmentation State
-    private var udpFrameId: UInt32 = 0
-    
     // Transfer Stats
     @Published var transferRate: String = "0 Mbps"
     private var bytesSentWindow: Int = 0
@@ -2796,17 +2677,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             UserDefaults.standard.set(displayPlacement.rawValue, forKey: Self.displayPlacementDefaultsKey)
         }
     }
-    @Published var connectionType: String = "TCP" {
-        didSet {
-            if connectionType != "TCP" {
-                connectionType = "TCP"
-                return
-            }
-            // Restart browsing if type changes
-            browser?.cancel()
-            startBrowsing()
-        }
-    }
+    /// The private build streams over TCP only. This was a user-settable
+    /// "TCP or UDP" switch whose setter silently rewrote every other value back
+    /// to TCP, so the UDP send path it guarded could never run — that path has
+    /// been removed along with it.
     
     @Published var selectedQuality: StreamQuality = .high {
         didSet { UserDefaults.standard.set(selectedQuality.rawValue, forKey: Self.selectedQualityKey) }
@@ -2814,8 +2688,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     // Private build uses Apple peer-to-peer/AWDL first.
     @Published var interfacePreference: NetworkInterfacePreference = .auto {
-        didSet { UserDefaults.standard.set(interfacePreference.rawValue, forKey: Self.interfacePreferenceKey) }
+        didSet {
+            guard oldValue != interfacePreference else { return }
+            UserDefaults.standard.set(interfacePreference.rawValue, forKey: Self.interfacePreferenceKey)
+            guard hasFinishedInitialization else { return }
+            restartBrowsingForRouteChange()
+        }
     }
+    private var hasFinishedInitialization = false
 
     // Auto-connect: automatically connect to discovered receivers
     @Published var autoConnect: Bool = false {
@@ -2861,14 +2741,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             selectedQuality = quality
         }
         if let raw = defaults.string(forKey: Self.interfacePreferenceKey),
-           let preference = NetworkInterfacePreference(rawValue: raw) {
+           let preference = NetworkInterfacePreference.restored(from: raw) {
             interfacePreference = preference
         }
     }
-
-    // Manual connection
-    @Published var manualHost: String = ""
-    @Published var manualPort: String = "51820"
 
     var isConnected: Bool { !pipelines.isEmpty }
 
@@ -2917,9 +2793,34 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     func showHiddenDevices() {
         hiddenDeviceKeys.removeAll()
         saveHiddenDeviceKeys()
-        browser?.cancel()
         startBrowsing()
         LogManager.shared.log("Sender: Cleared hidden devices")
+    }
+
+    private func restartBrowsingForRouteChange() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.restartBrowsingForRouteChange()
+            }
+            return
+        }
+
+        LogManager.shared.log("Sender: Route changed to \(interfacePreference.label) — cancelling old discovery and pending dials")
+        browserRetryWork?.cancel()
+        browserRetryWork = nil
+        browser?.stateUpdateHandler = nil
+        browser?.browseResultsChangedHandler = nil
+        browser?.cancel()
+        browser = nil
+        foundServices.removeAll()
+
+        for connection in pendingConnections.values {
+            connection.stateUpdateHandler = nil
+            connection.cancel()
+        }
+        pendingConnections.removeAll()
+        connectingServiceNames.removeAll()
+        startBrowsing()
     }
 
 
@@ -2966,7 +2867,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         self.browser = browser
         
         browser.stateUpdateHandler = { [weak self] state in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 guard self.browserGeneration == generation,
                       self.browser === browser else { return }
@@ -2996,26 +2897,31 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
         
         browser.browseResultsChangedHandler = { [weak self] results, changes in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 guard self.browserGeneration == generation,
                       self.browser === browser else { return }
                 // Build list from mDNS browse results
-                var services = results.compactMap { result -> DiscoveredService? in
+                let discovered = results.compactMap { result -> DiscoveredService? in
                     if case .service(let name, _, _, _) = result.endpoint {
-                        return DiscoveredService(name: name, endpoint: result.endpoint)
+                        return DiscoveredService(
+                            name: name,
+                            endpoint: result.endpoint,
+                            interfaces: result.interfaces
+                        )
                     }
                     return nil
                 }
-                // Preserve manual connections that aren't from mDNS
-                for existing in self.foundServices {
-                    if case .hostPort = existing.endpoint,
-                       !services.contains(where: { $0.name == existing.name }) {
-                        services.append(existing)
-                    }
-                }
+                var services = discovered.filter { $0.isVisible(in: self.interfacePreference) }
                 services.removeAll { self.hiddenDeviceKeys.contains(self.deviceKey(for: $0.name)) }
                 self.foundServices = services
+
+                for service in discovered {
+                    LogManager.shared.log(
+                        "Sender: Bonjour found \(service.name) via \(service.interfaceSummary); "
+                            + "visible in \(self.interfacePreference.label): \(service.isVisible(in: self.interfacePreference))"
+                    )
+                }
 
                 // Any result at all proves discovery is permitted.
                 if !services.isEmpty {
@@ -3028,8 +2934,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         let serviceKey = self.deviceKey(for: service.name)
                         if !self.connectedServices.contains(where: { self.deviceKey(for: $0.name) == serviceKey })
                             && !self.connectingServiceNames.contains(serviceKey) {
-                            // Skip ADB synthetic entries
-                            if service.name.contains("Android (USB)") || service.name.contains("Android (WiFi ADB)") { continue }
                             // Skip " P2P" duplicate — sender uses P2P automatically for Apple devices
                             if service.name.hasSuffix(" P2P") && services.contains(where: { $0.name == String(service.name.dropLast(4)) }) { continue }
                             LogManager.shared.log("Sender: Auto-connecting to \(service.name)")
@@ -3061,7 +2965,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             if self.interfacePreference != .auto {
                 LogManager.shared.log(
                     "Sender: No devices found in \(Int(Self.discoverySilenceTimeout))s while restricted to "
-                        + "\(self.interfacePreference.rawValue). Either that link is down or the receiver is not on it — "
+                        + "\(self.interfacePreference.label). Either that link is down or the receiver is not on it — "
                         + "switch to Auto to search every route."
                 )
                 return
@@ -3109,11 +3013,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private let interfaceMonitor = NWPathMonitor()
     private var cachedAWDLInterface: NWInterface?
     private var cachedInfraInterface: NWInterface?
-    /// The wired interface that currently carries an address, if any. Bonjour
-    /// also advertises the receiver on address-less wired links, so the wired
-    /// mode has to pick the usable one explicitly instead of letting the system
-    /// route onto a dead interface.
-    private var cachedWiredInterface: NWInterface?
     
     init() {
         LogManager.shared.log("Sender: App Starting")
@@ -3122,12 +3021,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             .flatMap(VirtualDisplayManager.DisplayPlacement.init(rawValue:)) ?? .right
         hiddenDeviceKeys = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenDeviceKeysDefaultsKey) ?? [])
         restorePersistedSettings()
+        hasFinishedInitialization = true
         // ScreenBridge is display-only: all direct control stays on the Mac.
         UserDefaults.standard.removeObject(forKey: "iPadInputEnabled")
         
         // We can't monitor recursively in init easily, but we can start it.
         interfaceMonitor.pathUpdateHandler = { [weak self] path in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 for interface in path.availableInterfaces {
                     // Cache AWDL
@@ -3139,7 +3039,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                             LogManager.shared.log("Network: Found P2P Interface: \(interface.name) (\(interface.type))")
                             // Restart browsing on this interface so we get the Link-Local Address
                             // If we don't, we might try to connect to the Router IP via AWDL, which fails.
-                            if self.interfacePreference == .p2pOnly {
+                            if self.interfacePreference == .awdl {
                                 LogManager.shared.log("Network: Restarting Browser to force discovery via \(interface.name)...")
                                 self.startBrowsing()
                             }
@@ -3155,20 +3055,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     }
                 }
 
-                // Pick the wired interface that actually has an address. A USB
-                // interface left over from a previous enumeration stays listed
-                // as available while holding none, and dialing onto it just
-                // burns the whole retry budget on timeouts.
-                let addressable = Set(Self.addressableWiredInterfaces().map(\.name))
-                let usableWired = path.availableInterfaces.first {
-                    $0.type != .wifi && $0.type != .loopback && addressable.contains($0.name)
-                }
-                if usableWired?.name != self.cachedWiredInterface?.name {
-                    self.cachedWiredInterface = usableWired
-                    if let usableWired {
-                        LogManager.shared.log("Network: Usable wired interface: \(usableWired.name) (\(usableWired.type))")
-                    }
-                }
             }
         }
         interfaceMonitor.start(queue: .global())
@@ -3250,7 +3136,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
-    private func sendLengthPrefixedData(_ data: Data, on connection: NWConnection, completion: @escaping (Result<Void, Error>) -> Void) {
+    private func sendLengthPrefixedData(_ data: Data, on connection: NWConnection, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
         guard !data.isEmpty else {
             completion(.failure(PairingTransportError.emptyFrame))
             return
@@ -3270,7 +3156,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         })
     }
 
-    private func receiveLengthPrefixedData(on connection: NWConnection, completion: @escaping (Result<Data, Error>) -> Void) {
+    private func receiveLengthPrefixedData(on connection: NWConnection, completion: @escaping @Sendable (Result<Data, Error>) -> Void) {
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { content, _, isComplete, error in
             if let error {
                 completion(.failure(error))
@@ -3305,7 +3191,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
-    private func sendCodable<T: Encodable>(_ value: T, on connection: NWConnection, completion: @escaping (Result<Void, Error>) -> Void) {
+    private func sendCodable<T: Encodable>(_ value: T, on connection: NWConnection, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
         do {
             let data = try JSONEncoder().encode(value)
             sendLengthPrefixedData(data, on: connection, completion: completion)
@@ -3314,7 +3200,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
-    private func receiveCodable<T: Decodable>(_ type: T.Type, on connection: NWConnection, completion: @escaping (Result<T, Error>) -> Void) {
+    private func receiveCodable<T: Decodable & Sendable>(_ type: T.Type, on connection: NWConnection, completion: @escaping @Sendable (Result<T, Error>) -> Void) {
         receiveLengthPrefixedData(on: connection) { result in
             switch result {
             case .success(let data):
@@ -3340,10 +3226,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         secret: Data,
         role: StreamConnectionRole,
         receiverSessionID: UUID? = nil,
-        completion: @escaping (Result<AuthenticatedPairing, Error>) -> Void
+        completion: @escaping @Sendable (Result<AuthenticatedPairing, Error>) -> Void
     ) {
         let completionGuard = SingleCompletionGuard()
-        let finish: (Result<AuthenticatedPairing, Error>) -> Void = { result in
+        let finish: @Sendable (Result<AuthenticatedPairing, Error>) -> Void = { result in
             guard completionGuard.claim() else { return }
             completion(result)
         }
@@ -3365,7 +3251,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 return
             }
 
-            self?.receiveCodable(ReceiverHello.self, on: connection) { receiverResult in
+            self?.receiveCodable(ReceiverHello.self, on: connection) { [weak self] receiverResult in
                 switch receiverResult {
                 case .success(let receiverHello):
                     if role == .audio && receiverHello.sessionID != receiverSessionID {
@@ -3419,9 +3305,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         service: DiscoveredService,
         streamEndpoint: NWEndpoint,
         isP2P: Bool,
-        isLoopback: Bool,
         isWiredCable: Bool,
-        forceTCP: Bool = false,
+        requestedPreference: NetworkInterfacePreference,
+        requiredInterface: NWInterface?,
         authentication: AuthenticatedPairing
     ) {
         removeExistingConnections(matching: service, keeping: connectionId)
@@ -3438,10 +3324,18 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             sessionKey: authentication.sessionKey
         )
         pipeline.isP2P = isP2P
-        pipeline.isLoopback = isLoopback
         pipeline.isWiredCable = isWiredCable
-        pipeline.forceTCP = forceTCP
-        pipeline.isWiFiADB = isLoopback && service.name.contains("WiFi")
+        pipeline.requestedPreference = requestedPreference
+        pipeline.requiredRouteInterface = requiredInterface
+        pipeline.requestedRoute = requestedPreference.label
+        pipeline.systemPath = Self.systemPathDescription(connection.currentPath)
+        if let requiredInterface {
+            pipeline.routeEvidence = "Required \(requiredInterface.name)[\(requiredInterface.type)] from Bonjour"
+            pipeline.hasVerifiedRouteEvidence = true
+        } else {
+            pipeline.routeEvidence = "Bonjour: \(service.interfaceSummary); system selected route"
+            pipeline.hasVerifiedRouteEvidence = false
+        }
         pipeline.appliedUseVirtualDisplay = useVirtualDisplay
         pipeline.appliedResolutionName = selectedResolution.name
         pipeline.appliedRetina = isRetina
@@ -3452,9 +3346,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Sender: Receiver handshake reported screen \(capabilities.pixelWidth)x\(capabilities.pixelHeight) for \(service.name)")
         }
 
-        let nameLower = service.name.lowercased()
-        let isLegacyReceiver = nameLower.hasPrefix("bettercast receiver")
-            && !nameLower.contains("android") && !nameLower.contains("windows") && !nameLower.contains("linux")
+        let isLegacyReceiver = service.name.lowercased().hasPrefix("bettercast receiver")
         pipeline.supportsTypeByte = !isLegacyReceiver
 
         pipelines[connectionId] = pipeline
@@ -3475,9 +3367,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         connection.betterPathUpdateHandler = { better in
             LogManager.shared.log("Sender: Better path \(better ? "available" : "no longer available") for \(service.name)")
         }
-        connection.pathUpdateHandler = { path in
-            let interfaces = path.availableInterfaces.map(\.name).joined(separator: ", ")
-            LogManager.shared.log("Sender: Path changed for \(service.name): [\(interfaces)] status=\(path.status)")
+        connection.pathUpdateHandler = { [weak self] path in
+            let pathDescription = Self.systemPathDescription(path)
+            LogManager.shared.log("Sender: Path changed for \(service.name): \(pathDescription), status=\(path.status)")
+            DispatchQueue.main.async { [weak self] in
+                guard self?.pipelines[connectionId]?.connection === connection else { return }
+                self?.pipelines[connectionId]?.systemPath = pathDescription
+                self?.updateConnectedDisplays()
+            }
         }
 
         startPipeline(for: connectionId)
@@ -3496,9 +3393,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         service: DiscoveredService,
         streamEndpoint: NWEndpoint,
         isP2P: Bool,
-        isLoopback: Bool,
         isWiredCable: Bool,
-        forceTCP: Bool = false
+        requestedPreference: NetworkInterfacePreference,
+        requiredInterface: NWInterface?
     ) {
         let serviceKey = deviceKey(for: service.name)
         guard let secret = loadPairingSecret() else {
@@ -3516,7 +3413,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             secret: secret,
             role: .mediaControl
         ) { [weak self] result in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.connectingServiceNames.remove(serviceKey)
 
@@ -3533,9 +3430,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         service: service,
                         streamEndpoint: streamEndpoint,
                         isP2P: isP2P,
-                        isLoopback: isLoopback,
                         isWiredCable: isWiredCable,
-                        forceTCP: forceTCP,
+                        requestedPreference: requestedPreference,
+                        requiredInterface: requiredInterface,
                         authentication: authentication
                     )
                 case .failure(let error):
@@ -3559,18 +3456,20 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         parameters.serviceClass = .interactiveVideo
         parameters.preferNoProxies = true
 
-        if pipeline.isP2P {
+        switch pipeline.requestedPreference {
+        case .auto:
             parameters.includePeerToPeer = true
-            if let awdl = cachedAWDLInterface {
-                parameters.requiredInterface = awdl
-            }
-        } else if pipeline.isLoopback {
-            parameters.includePeerToPeer = false
-        } else if pipeline.isWiredCable {
+            parameters.prohibitedInterfaceTypes = [.loopback]
+        case .requireCable:
             parameters.includePeerToPeer = false
             parameters.prohibitedInterfaceTypes = [.loopback, .wifi]
-        } else {
-            parameters.includePeerToPeer = interfacePreference != .routerOnly
+            parameters.requiredInterface = pipeline.requiredRouteInterface
+        case .awdl:
+            parameters.includePeerToPeer = true
+            parameters.requiredInterface = pipeline.requiredRouteInterface
+        case .wifi:
+            parameters.includePeerToPeer = false
+            parameters.requiredInterface = pipeline.requiredRouteInterface
         }
 
         return parameters
@@ -3615,13 +3514,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         // Bound the dial in wall-clock time so a route that never materialises
         // degrades to another route instead of hanging in "Connecting".
-        var audioSettled = false
+        let attemptState = ConnectionAttemptState()
+        let requestedPreference = pipeline.requestedPreference
+        let receiverSessionID = pipeline.receiverSessionID
         let audioTimeout = DispatchWorkItem { [weak self] in
-            guard let self, !audioSettled else { return }
-            audioSettled = true
+            guard let self, !attemptState.isSettled else { return }
+            attemptState.isSettled = true
             guard self.pipelines[connectionId]?.audioConnection === audioConnection else { return }
 
-            if allowAnyRoute {
+            if allowAnyRoute || requestedPreference != .auto {
                 LogManager.shared.log("AudioConnection: Timed out on every route for \(serviceName)")
                 self.handleAudioConnectionEnded(
                     audioConnection,
@@ -3642,20 +3543,20 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.audioConnectTimeout, execute: audioTimeout)
 
         audioConnection.stateUpdateHandler = { [weak self] state in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
 
                 switch state {
                 case .ready:
-                    audioSettled = true
+                    attemptState.isSettled = true
                     audioTimeout.cancel()
                     self.performPairingHandshake(
                         on: audioConnection,
                         secret: secret,
                         role: .audio,
-                        receiverSessionID: pipeline.receiverSessionID
+                        receiverSessionID: receiverSessionID
                     ) { [weak self] result in
-                        DispatchQueue.main.async {
+                        DispatchQueue.main.async { [weak self] in
                             guard let self else { return }
 
                             switch result {
@@ -3679,7 +3580,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         }
                     }
                 case .failed(let error):
-                    audioSettled = true
+                    attemptState.isSettled = true
                     audioTimeout.cancel()
                     LogManager.shared.log("AudioConnection: Failed for \(serviceName): \(error)")
                     self.handleAudioConnectionEnded(
@@ -3688,7 +3589,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         reason: "transport failed"
                     )
                 case .cancelled:
-                    audioSettled = true
+                    attemptState.isSettled = true
                     audioTimeout.cancel()
                     self.handleAudioConnectionEnded(
                         audioConnection,
@@ -3742,16 +3643,19 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         path: NWPath?,
         intent: ConnectionRouteIntent
     ) -> ConnectionRouteClassification {
-        if intent == .loopback || path?.usesInterfaceType(.loopback) == true {
-            return ConnectionRouteClassification(isP2P: false, isLoopback: true, isWiredCable: false)
+        switch intent {
+        case .peerToPeer:
+            return ConnectionRouteClassification(isP2P: true, isWiredCable: false)
+        case .wired:
+            return ConnectionRouteClassification(isP2P: false, isWiredCable: true)
+        case .infrastructure:
+            return ConnectionRouteClassification(isP2P: false, isWiredCable: false)
+        case .automatic:
+            return ConnectionRouteClassification(
+                isP2P: false,
+                isWiredCable: path?.usesInterfaceType(.wiredEthernet) == true
+            )
         }
-        if intent == .peerToPeer {
-            return ConnectionRouteClassification(isP2P: true, isLoopback: false, isWiredCable: false)
-        }
-        if intent == .wired || path?.usesInterfaceType(.wiredEthernet) == true {
-            return ConnectionRouteClassification(isP2P: false, isLoopback: false, isWiredCable: true)
-        }
-        return ConnectionRouteClassification(isP2P: false, isLoopback: false, isWiredCable: false)
     }
 
     private func logConnectionRoute(_ route: ConnectionRouteClassification, path: NWPath?) {
@@ -3761,145 +3665,115 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         LogManager.shared.log("Sender: \(route.description) active")
     }
 
-    /// Wired (non-WiFi, non-loopback) interfaces that actually carry an IP
-    /// address right now.
-    ///
-    /// `ifconfig` reporting `status: active` is not enough: after a USB device
-    /// re-enumerates, its interface can stay active while holding no address,
-    /// and connections routed onto it hang until they time out.
-    static func addressableWiredInterfaces() -> [(name: String, address: String)] {
-        var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let first = head else { return [] }
-        defer { freeifaddrs(head) }
-
-        var found: [(name: String, address: String)] = []
-        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let flags = Int32(ptr.pointee.ifa_flags)
-            guard flags & IFF_UP == IFF_UP, flags & IFF_LOOPBACK == 0 else { continue }
-            guard let addr = ptr.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else { continue }
-
-            let name = String(cString: ptr.pointee.ifa_name)
-            // en0 is the Wi-Fi radio on Apple laptops; this mode excludes it.
-            guard name != "en0", !name.hasPrefix("awdl"), !name.hasPrefix("llw"),
-                  !name.hasPrefix("utun"), !name.hasPrefix("gif"), !name.hasPrefix("stf") else { continue }
-
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            guard getnameinfo(addr, socklen_t(addr.pointee.sa_len),
-                              &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
-            found.append((name: name, address: String(cString: host)))
-        }
-        return found
+    /// Network.framework can distinguish path interface *types*, but AWDL and
+    /// infrastructure Wi-Fi both report as `.wifi`. Keep that ambiguity visible
+    /// instead of presenting an available interface as the active one.
+    fileprivate static func systemPathDescription(_ path: NWPath?) -> String {
+        guard let path else { return "Unknown" }
+        if path.usesInterfaceType(.wiredEthernet) { return "Wired Ethernet family" }
+        if path.usesInterfaceType(.wifi) { return "Wi-Fi family (Wi-Fi or AWDL)" }
+        if path.usesInterfaceType(.cellular) { return "Cellular" }
+        if path.usesInterfaceType(.loopback) { return "Loopback" }
+        return "Other network path"
     }
 
     private func configureParameters(_ parameters: NWParameters) {
-        parameters.includePeerToPeer = true // Always allow discovery at least
-        
-        // Use cached AWDL if available (especially for Browser)
-        if interfacePreference == .p2pOnly, let awdl = cachedAWDLInterface {
-             LogManager.shared.log("Parameters: Binding to P2P Interface \(awdl.name) ✅")
-             parameters.requiredInterface = awdl
-             parameters.serviceClass = .interactiveVideo
-             parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
-             return // Skip the rest
-        }
-        
+        parameters.serviceClass = .interactiveVideo
+        parameters.preferNoProxies = true
+
         switch interfacePreference {
         case .auto:
-            parameters.serviceClass = .responsiveData
+            parameters.includePeerToPeer = true
             parameters.prohibitedInterfaceTypes = [.loopback]
-            
-        case .p2pOnly:
-             // Direct binding to AWDL interface
-             if let awdl = cachedAWDLInterface {
-                 LogManager.shared.log("Sender: Hard-Locking to Interface: \(awdl.name) ✅")
-                 parameters.requiredInterface = awdl
-                 // Since we require a specific interface, prohibited list is irrelevant/redundant
-             } else {
-                 LogManager.shared.log("Sender: AWDL Interface not found yet. Falling back to Prohibition Strategy (Banning Infra). ⚠️")
-                 
-                 // Ban the interface object directly, NOT the type
-                 if let infra = cachedInfraInterface {
-                      LogManager.shared.log("Sender: Banning Infra Interface: \(infra.name) 🚫")
-                      parameters.prohibitedInterfaces = [infra]
-                 } else {
-                      LogManager.shared.log("Sender: Infra Interface not found either? Falling back to Type prohibition (Risky).")
-                      // If we can't find en0 object, we can't ban it specifically. 
-                      // Fallback to banning Wired/Loopback only.
-                 }
-                 
-                 parameters.serviceClass = .interactiveVideo
-             }
-             
-             // Always ban these types
-             parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
-             parameters.preferNoProxies = true
-            
-        case .routerOnly:
-            parameters.serviceClass = .interactiveVideo
-            parameters.prohibitedInterfaceTypes = [.loopback]
-            // "Force Router/WiFi" has to actually exclude AWDL. This was left at
-            // the `true` set earlier in the function, so the system could still
-            // pick a peer-to-peer path — after which the sender misread the link
-            // as P2P and applied P2P bitrate and backpressure settings to what
-            // was really an infrastructure link.
+
+        case .requireCable:
+            // Browser broadly excludes radio paths, then each result is filtered
+            // and the connection requires the exact wired Bonjour interface.
             parameters.includePeerToPeer = false
-
-        case .wiredCable:
-            // USB-C / Thunderbolt Bridge / Ethernet cable direct connection
-            // Thunderbolt Bridge appears as .other (bridge0), Ethernet as .wiredEthernet
-            // Ban WiFi and AWDL to force traffic over cable only
-            parameters.serviceClass = .interactiveVideo
             parameters.prohibitedInterfaceTypes = [.loopback, .wifi]
-            parameters.includePeerToPeer = false // No AWDL needed for cable
-            parameters.preferNoProxies = true
 
-            // A USB/Thunderbolt interface can sit in "active" state with no
-            // address at all after the device re-enumerates, and Bonjour keeps
-            // advertising the receiver on it. Every dial then times out against
-            // an address-less link while a perfectly good wired interface may be
-            // sitting right next to it. Say so up front instead of spending the
-            // whole retry budget rediscovering it.
-            // Deliberately NOT pinned to a specific interface: which port the
-            // cable lands on varies per machine and per plug, so binding one
-            // would break the moment it changes. The system picks; the log below
-            // just records what was actually usable at the time.
-            let wiredAddresses = Self.addressableWiredInterfaces()
-            if wiredAddresses.isEmpty {
-                LogManager.shared.log(
-                    "Parameters: Wired/Cable mode — WARNING: no wired interface currently has an IP address. "
-                        + "Connections will time out. Reconnect the cable or switch to Auto."
-                )
-            } else {
-                LogManager.shared.log(
-                    "Parameters: Wired/Cable mode - WiFi/P2P disabled, usable wired interfaces: "
-                        + wiredAddresses.map { "\($0.name)(\($0.address))" }.joined(separator: ", ")
-                )
+        case .awdl:
+            parameters.includePeerToPeer = true
+            parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
+            if let awdl = cachedAWDLInterface {
+                parameters.requiredInterface = awdl
+                LogManager.shared.log("Parameters: Requiring AWDL discovery on \(awdl.name)")
+            } else if let infrastructure = cachedInfraInterface {
+                parameters.prohibitedInterfaces = [infrastructure]
+                LogManager.shared.log("Parameters: AWDL not ready; excluding infrastructure interface \(infrastructure.name)")
+            }
+
+        case .wifi:
+            parameters.includePeerToPeer = false
+            parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
+            if let infrastructure = cachedInfraInterface {
+                parameters.requiredInterface = infrastructure
+                LogManager.shared.log("Parameters: Requiring infrastructure Wi-Fi discovery on \(infrastructure.name)")
             }
         }
     }
-    
-    /// Cold USB/Thunderbolt and AWDL links routinely refuse the first dial
-    /// while the interface is still coming up, so a single retry was not
-    /// enough: connecting over cable regularly needed three tries, and the
-    /// user had to click Connect again by hand after ~16s of apparent failure.
-    private static let maximumConnectAttempts = ConnectionRetryPolicy.maximumAttempts
-    /// Pause between cable/AWDL warm-up retries. Dialing again immediately kept
-    /// the receiver's pending-handshake slots occupied by connections we had
-    /// just cancelled.
+
+    /// AWDL can need several cold-start dials while its radio wakes. Cable and
+    /// infrastructure modes get one dial because retrying cannot create a
+    /// missing interface/address.
+    private static let maximumAWDLConnectAttempts = ConnectionRetryPolicy.maximumAWDLAttempts
     private static let connectRetryBackoff: TimeInterval = ConnectionRetryPolicy.backoffSeconds
-    /// Budget for the unrestricted fallback dial — the end of every retry chain.
-    private static let fallbackConnectTimeout: TimeInterval = 10.0
+    private static let connectTimeout: TimeInterval = 10.0
+
+    private struct PlannedConnection {
+        let parameters: NWParameters
+        let intent: ConnectionRouteIntent
+        let requiredInterface: NWInterface?
+    }
+
+    private func planConnection(
+        to service: DiscoveredService,
+        preference: NetworkInterfacePreference
+    ) -> PlannedConnection? {
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.enableKeepalive = true
+        tcpOptions.noDelay = true
+        tcpOptions.connectionTimeout = 10
+
+        let parameters = NWParameters(tls: nil, tcp: tcpOptions)
+        parameters.serviceClass = .interactiveVideo
+        parameters.preferNoProxies = true
+
+        switch preference {
+        case .auto:
+            parameters.includePeerToPeer = true
+            parameters.prohibitedInterfaceTypes = [.loopback]
+            return PlannedConnection(parameters: parameters, intent: .automatic, requiredInterface: nil)
+
+        case .requireCable:
+            guard let interface = service.requiredInterface(for: .requireCable) else { return nil }
+            parameters.includePeerToPeer = false
+            parameters.requiredInterface = interface
+            parameters.prohibitedInterfaceTypes = [.loopback, .wifi]
+            return PlannedConnection(parameters: parameters, intent: .wired, requiredInterface: interface)
+
+        case .awdl:
+            guard let interface = service.requiredInterface(for: .awdl) else { return nil }
+            parameters.includePeerToPeer = true
+            parameters.requiredInterface = interface
+            parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
+            return PlannedConnection(parameters: parameters, intent: .peerToPeer, requiredInterface: interface)
+
+        case .wifi:
+            guard let interface = service.requiredInterface(for: .wifi) else { return nil }
+            parameters.includePeerToPeer = false
+            parameters.requiredInterface = interface
+            parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
+            return PlannedConnection(parameters: parameters, intent: .infrastructure, requiredInterface: interface)
+        }
+    }
 
     func connect(to service: DiscoveredService, attempt: Int = 1) {
         let serviceKey = deviceKey(for: service.name)
-        // Check if already connected or currently connecting to this service
         if connectedServices.contains(where: { deviceKey(for: $0.name) == serviceKey }) {
             LogManager.shared.log("Sender: Already connected to \(service.name)")
             return
         }
-        // Only a fresh, externally initiated connect is a duplicate. A retry
-        // (attempt > 1) is the continuation of an attempt that already owns the
-        // slot, so it must not be rejected by its own reservation.
         guard ConnectionRetryPolicy.shouldAcceptConnect(
             attempt: attempt,
             hasReservation: connectingServiceNames.contains(serviceKey)
@@ -3907,690 +3781,135 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Sender: Already connecting to \(service.name) — ignoring duplicate")
             return
         }
-        connectingServiceNames.insert(serviceKey)
 
-        let deviceCount = pipelines.count + 1
-        setPhase(.connecting, "Connecting to \(service.name) (Device #\(deviceCount))...")
-
-        // Smart routing: Apple receivers (iOS/Mac) get P2P/AWDL, others get infrastructure
-        let nameLower = service.name.lowercased()
-        // Manual IP connections (e.g. "10.0.0.5:51820") are never Apple receivers
-        let isManualIP = service.name.contains(":") && service.name.first?.isNumber == true
-        let isAppleReceiver = !isManualIP && !nameLower.contains("android") && !nameLower.contains("windows") && !nameLower.contains("linux")
-
-        let tcpOptions = NWProtocolTCP.Options()
-        tcpOptions.enableKeepalive = true
-        tcpOptions.noDelay = true
-        tcpOptions.connectionTimeout = 10
-        let parameters = NWParameters(tls: nil, tcp: tcpOptions)
-        parameters.serviceClass = .interactiveVideo
-        var routeIntent: ConnectionRouteIntent = .automatic
-
-        // For Apple devices, prefer the P2P endpoint if allowed by the selected mode.
-        var connectEndpoint = service.endpoint
-        if isAppleReceiver && (interfacePreference == .auto || interfacePreference == .p2pOnly) {
-            if interfacePreference == .p2pOnly {
-                routeIntent = .peerToPeer
-            }
-            if let p2pService = foundServices.first(where: { $0.name == service.name + " P2P" }) {
-                // Use the P2P-advertised endpoint for AWDL connection
-                connectEndpoint = p2pService.endpoint
-                routeIntent = .peerToPeer
-                parameters.includePeerToPeer = true
-                if let awdl = cachedAWDLInterface {
-                    routeIntent = .peerToPeer
-                    parameters.requiredInterface = awdl
-                    LogManager.shared.log("Sender: Apple receiver — using P2P endpoint + AWDL (\(awdl.name)) for \(service.name)")
-                } else {
-                    if interfacePreference == .p2pOnly, let infra = cachedInfraInterface {
-                        LogManager.shared.log("Sender: Apple receiver — using P2P endpoint, banning infra for \(service.name)")
-                        parameters.prohibitedInterfaces = [infra]
-                        parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
-                        parameters.serviceClass = .interactiveVideo
-                    } else {
-                        configureParameters(parameters)
-                        LogManager.shared.log("Sender: Apple receiver — P2P endpoint found but AWDL unavailable; using Auto fallback for \(service.name)")
-                    }
-                }
-            } else {
-                // No separate P2P endpoint. Auto can use normal Wi-Fi; Force P2P still
-                // bans infrastructure so failures are obvious instead of silently routing.
-                parameters.includePeerToPeer = true
-                parameters.serviceClass = .interactiveVideo
-                if let awdl = cachedAWDLInterface {
-                    parameters.requiredInterface = awdl
-                    LogManager.shared.log("Sender: Apple receiver — requiring AWDL (\(awdl.name)) for \(service.name)")
-                } else if let infra = cachedInfraInterface {
-                    if interfacePreference == .p2pOnly {
-                        routeIntent = .peerToPeer
-                        parameters.prohibitedInterfaces = [infra]
-                        parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
-                        LogManager.shared.log("Sender: Apple receiver — banning infra, forcing P2P for \(service.name)")
-                    } else {
-                        configureParameters(parameters)
-                        LogManager.shared.log("Sender: Apple receiver — AWDL unavailable; using Auto fallback for \(service.name)")
-                    }
-                } else {
-                    LogManager.shared.log("Sender: Apple receiver — enabling P2P discovery for \(service.name)")
-                }
-            }
-        } else if isAppleReceiver {
-            configureParameters(parameters)
-            switch interfacePreference {
-            case .p2pOnly: routeIntent = .peerToPeer
-            case .routerOnly: routeIntent = .infrastructure
-            case .wiredCable: routeIntent = .wired
-            case .auto: routeIntent = .automatic
-            }
-            LogManager.shared.log("Sender: Apple receiver — using selected mode \(interfacePreference.rawValue) for \(service.name)")
-        } else {
-            // Non-Apple devices: skip P2P, go straight to infrastructure
-            routeIntent = .infrastructure
-            parameters.includePeerToPeer = false
-            parameters.serviceClass = .interactiveVideo
-            LogManager.shared.log("Sender: Non-Apple receiver — using infrastructure for \(service.name)")
-        }
-
-        let connection = NWConnection(to: connectEndpoint, using: parameters)
-        let connectionId = UUID()
-        pendingConnections[connectionId] = connection
-
-        // Timeout: if connection is still not ready after 5s, retry without P2P
-        // This handles cases where AWDL negotiation hangs
-        var connectionTimedOut = false
-        let canRetryViaInfrastructure = interfacePreference == .auto
-        let timeoutWork = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            // Only retry if still not connected (no pipeline created yet)
-            if self.pipelines[connectionId] == nil && !connectionTimedOut {
-                connectionTimedOut = true
-                // The reservation is deliberately NOT released here while a
-                // retry is still coming. Releasing it let a second, independent
-                // retry chain start for the same device — the chains then
-                // interleaved, each with its own attempt counter, and together
-                // they flooded the receiver (which refuses more than four
-                // pending handshakes), so a cable that works on one dial could
-                // never connect at all.
-                self.pendingConnections.removeValue(forKey: connectionId)
-                connection.cancel()
-
-                guard canRetryViaInfrastructure else {
-                    // The link wakes on demand, so cold dials time out until the
-                    // interface is up. Keep retrying automatically instead of
-                    // making the user click Connect again.
-                    if attempt < Self.maximumConnectAttempts {
-                        let next = attempt + 1
-                        LogManager.shared.log(
-                            "Sender: Connection to \(service.name) timed out in \(self.interfacePreference.rawValue) "
-                                + "— retrying (attempt \(next)/\(Self.maximumConnectAttempts), link warm-up)"
-                        )
-                        self.setPhase(.connecting, "Retrying \(service.name) (\(next)/\(Self.maximumConnectAttempts))...")
-                        // Back off so the receiver can retire the cancelled
-                        // handshake before the next dial arrives.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectRetryBackoff) { [weak self] in
-                            guard let self else { return }
-                            let deviceConnected = self.pipelines.values.contains {
-                                self.deviceKey(for: $0.service.name) == serviceKey
-                            }
-                            switch ConnectionRetryPolicy.backoffOutcome(
-                                hasReservation: self.connectingServiceNames.contains(serviceKey),
-                                deviceAlreadyConnected: deviceConnected
-                            ) {
-                            case .abandonSuperseded:
-                                return
-                            case .releaseReservation:
-                                self.connectingServiceNames.remove(serviceKey)
-                            case .proceedWithRetry:
-                                self.connect(to: service, attempt: next)
-                            }
-                        }
-                    } else {
-                        // The wired attempts are used up. Choosing a cable means
-                        // "prefer the fast link", not "refuse to connect if that
-                        // exact link is down" — and a USB interface can survive
-                        // re-enumeration as an address-less shell that Bonjour
-                        // still advertises on, which no amount of retrying fixes.
-                        // Hand off to an unrestricted dial so the system can use
-                        // whatever route actually reaches the device.
-                        LogManager.shared.log(
-                            "Sender: Connection to \(service.name) timed out in \(self.interfacePreference.rawValue) "
-                                + "after \(Self.maximumConnectAttempts) attempts — falling back to any reachable route"
-                        )
-                        self.connectingServiceNames.remove(serviceKey)
-                        self.setPhase(.connecting, "Trying other routes to \(service.name)...")
-
-                        let tcpOptions = NWProtocolTCP.Options()
-                        tcpOptions.enableKeepalive = true
-                        tcpOptions.noDelay = true
-                        tcpOptions.connectionTimeout = 10
-                        let fallbackParams = NWParameters(tls: nil, tcp: tcpOptions)
-                        fallbackParams.serviceClass = .interactiveVideo
-                        self.connectWithParameters(
-                            service: service,
-                            parameters: fallbackParams,
-                            forceTCP: false,
-                            routeIntent: .infrastructure
-                        )
-                    }
-                    return
-                }
-
-                // The infrastructure fallback dials through connectWithParameters,
-                // which makes its own reservation, so release this one first.
-                self.connectingServiceNames.remove(serviceKey)
-                LogManager.shared.log("Sender: Connection to \(service.name) timed out — retrying via infrastructure")
-                let tcpOptions = NWProtocolTCP.Options()
-                tcpOptions.enableKeepalive = true
-                tcpOptions.noDelay = true
-                tcpOptions.connectionTimeout = 10
-                let fallbackParams = NWParameters(tls: nil, tcp: tcpOptions)
-                fallbackParams.serviceClass = .interactiveVideo
-                self.connectWithParameters(
-                    service: service,
-                    parameters: fallbackParams,
-                    forceTCP: false,
-                    routeIntent: .infrastructure
-                )
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeoutWork)
-
-        connection.stateUpdateHandler = { [weak self] state in
-            DispatchQueue.main.async {
-                switch state {
-                case .ready:
-                    timeoutWork.cancel() // Connection succeeded, cancel timeout
-                    guard let self else { return }
-                    let route = self.classifyConnectionRoute(
-                        path: connection.currentPath,
-                        intent: routeIntent
-                    )
-                    self.logConnectionRoute(route, path: connection.currentPath)
-
-                    self.authenticateAndActivateConnection(
-                        connection,
-                        connectionId: connectionId,
-                        service: service,
-                        streamEndpoint: connectEndpoint,
-                        isP2P: route.isP2P,
-                        isLoopback: route.isLoopback,
-                        isWiredCable: route.isWiredCable
-                    )
-                case .failed(let error):
-                    timeoutWork.cancel()
-                    self?.connectingServiceNames.remove(serviceKey)
-                    self?.pendingConnections.removeValue(forKey: connectionId)
-                    LogManager.shared.log("Sender: Connection to \(service.name) failed: \(error)")
-                    // attemptReconnect only takes effect if an authenticated pipeline
-                    // existed (removeConnection no-ops otherwise), so failed dial
-                    // attempts don't trigger reconnect loops.
-                    self?.removeConnection(connectionId, attemptReconnect: true, reason: "transport failed: \(error)")
-
-                    let remaining = self?.pipelines.count ?? 0
-                    if remaining == 0 {
-                        // scheduleReconnect (if triggered above) immediately moves
-                        // the phase to .reconnecting after this.
-                        if self?.connectionPhase != .reconnecting {
-                            self?.setPhase(.failed, "Connection failed")
-                        }
-                    } else {
-                        self?.setPhase(.connected, "Connected to \(remaining) device(s)")
-                    }
-                case .waiting(let error):
-                    self?.setPhase(.connecting, "Waiting for \(service.name)... (\(error.localizedDescription))")
-                case .cancelled:
-                    timeoutWork.cancel()
-                    // The warm-up retry path cancels this connection itself and
-                    // keeps owning the reservation for the next dial. Releasing
-                    // it here would re-open the door for a competing retry chain
-                    // that the timeout handler just took care to prevent.
-                    if ConnectionRetryPolicy.shouldReleaseReservationOnCancel(
-                        cancelledForRetry: connectionTimedOut
-                    ) {
-                        self?.connectingServiceNames.remove(serviceKey)
-                    }
-                    self?.pendingConnections.removeValue(forKey: connectionId)
-                default:
-                    break
-                }
-            }
-        }
-
-        connection.start(queue: .main)
-    }
-
-    func connectManual() {
-        let host = manualHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !host.isEmpty else { return }
-        guard let portNum = UInt16(manualPort), portNum > 0,
-              let port = NWEndpoint.Port(rawValue: portNum) else {
-            LogManager.shared.log("Sender: Invalid port '\(manualPort)'")
-            return
-        }
-
-        let endpoint = NWEndpoint.hostPort(
-            host: NWEndpoint.Host(host),
-            port: port
-        )
-        let service = DiscoveredService(name: "\(host):\(portNum)", endpoint: endpoint)
-
-        // Add to foundServices so it appears in the Devices list with status/disconnect
-        let serviceKey = deviceKey(for: service.name)
-        if !foundServices.contains(where: { deviceKey(for: $0.name) == serviceKey }) {
-            foundServices.append(service)
-        }
-
-        // For manual connections, use plain TCP with no interface restrictions
-        // This allows localhost/ADB forwarding to work regardless of Mode setting
-        let isLocalhost = host == "localhost" || host == "127.0.0.1"
-
-        if isLocalhost {
-            let tcpOptions = NWProtocolTCP.Options()
-            tcpOptions.enableKeepalive = true
-            tcpOptions.noDelay = true
-            let parameters = NWParameters(tls: nil, tcp: tcpOptions)
-            parameters.serviceClass = .interactiveVideo
-            LogManager.shared.log("Sender: Manual connect to \(host):\(portNum) (localhost/ADB mode, no interface restrictions)")
-            connectWithParameters(service: service, parameters: parameters, forceTCP: true, routeIntent: .loopback)
-        } else {
-            // Non-localhost manual connect: use plain TCP without interface restrictions
-            // This ensures connections to Windows/Linux receivers on the LAN work
-            // regardless of the Mode setting (which may force P2P/AWDL)
-            let tcpOptions = NWProtocolTCP.Options()
-            tcpOptions.enableKeepalive = true
-            tcpOptions.noDelay = true
-            let parameters = NWParameters(tls: nil, tcp: tcpOptions)
-            parameters.serviceClass = .interactiveVideo
-            LogManager.shared.log("Sender: Manual connect to \(host):\(portNum) (LAN mode, no interface restrictions)")
-            connectWithParameters(service: service, parameters: parameters, forceTCP: false, routeIntent: .infrastructure)
-        }
-    }
-
-    // MARK: - ADB Wireless
-
-    @Published var adbStatus: String = ""
-    @Published var adbInProgress: Bool = false
-
-    /// Run an ADB shell command and return trimmed stdout
-    private func runAdb(_ args: [String]) -> (output: String, success: Bool) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/adb")
-        process.arguments = args
-        let pipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = errPipe
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return (output, process.terminationStatus == 0)
-        } catch {
-            return ("", false)
-        }
-    }
-
-    /// Get the Android device's WiFi IP address via ADB
-    /// - Parameter serial: Optional device serial to target (required when multiple devices connected)
-    private func getDeviceIP(serial: String? = nil) -> String? {
-        let deviceArgs: [String] = serial.map { ["-s", $0] } ?? []
-
-        // Method 1: ip route — look for wlan0 specifically (not cellular)
-        let routeResult = runAdb(deviceArgs + ["shell", "ip", "route"])
-        if routeResult.success {
-            let lines = routeResult.output.components(separatedBy: "\n")
-            for line in lines {
-                // Must be wlan0 to avoid picking up cellular IP
-                if line.contains("wlan0") && line.contains("src") {
-                    let parts = line.components(separatedBy: " ")
-                    if let srcIdx = parts.firstIndex(of: "src"), srcIdx + 1 < parts.count {
-                        let ip = parts[srcIdx + 1]
-                        if isPrivateIP(ip) { return ip }
-                    }
-                }
-            }
-        }
-
-        // Method 2: ip addr show wlan0 — parse inet line
-        let addrResult = runAdb(deviceArgs + ["shell", "ip", "addr", "show", "wlan0"])
-        if addrResult.success {
-            let lines = addrResult.output.components(separatedBy: "\n")
-            for line in lines {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.hasPrefix("inet ") {
-                    // "inet 192.168.1.100/24 ..."
-                    let parts = trimmed.components(separatedBy: " ")
-                    if parts.count >= 2 {
-                        let ip = parts[1].components(separatedBy: "/").first ?? ""
-                        if isPrivateIP(ip) { return ip }
-                    }
-                }
-            }
-        }
-
-        return nil
-    }
-
-    /// Check if IP is a private/local address (not cellular)
-    private func isPrivateIP(_ ip: String) -> Bool {
-        let parts = ip.split(separator: ".")
-        guard parts.count == 4 else { return false }
-        // 192.168.x.x, 10.x.x.x, 172.16-31.x.x
-        if ip.hasPrefix("192.168.") || ip.hasPrefix("10.") { return true }
-        if ip.hasPrefix("172."), let second = Int(parts[1]), (16...31).contains(second) { return true }
-        return false
-    }
-
-    /// Full ADB wireless handoff: USB → tcpip → forward → connect
-    func connectADBWireless() {
-        guard !adbInProgress else { return }
-        adbInProgress = true
-        adbStatus = "Checking device..."
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-
-            // 1. Check for connected devices (USB and/or WiFi)
-            let devices = self.runAdb(["devices"])
-            let allLines = devices.output.components(separatedBy: "\n").filter { $0.contains("\tdevice") }
-            let usbLines = allLines.filter { !$0.contains(":") }
-            let wifiLines = allLines.filter { $0.contains(":") }
-
-            // If already connected via WiFi ADB, just set up port forwarding directly
-            if let wifiLine = wifiLines.first {
-                let wifiSerial = wifiLine.components(separatedBy: "\t").first ?? ""
-                LogManager.shared.log("ADB Wireless: Already connected via WiFi: \(wifiSerial)")
-
-                // Disconnect existing streaming pipeline
-                DispatchQueue.main.async {
-                    self.adbStatus = "Setting up wireless tunnel..."
-                    let adbNames = ["Android (USB)", "Android (WiFi ADB)", "localhost:51820"]
-                    for name in adbNames {
-                        if let entry = self.pipelines.first(where: { $0.value.service.name == name }) {
-                            self.removeConnection(entry.key)
-                            LogManager.shared.log("ADB Wireless: Disconnected existing '\(name)'")
-                        }
-                    }
-                }
-                Thread.sleep(forTimeInterval: 0.3)
-
-                // Set up port forwarding through existing WiFi connection
-                let forwardResult = self.runAdb(["-s", wifiSerial, "forward", "tcp:51820", "tcp:51820"])
-                LogManager.shared.log("ADB Wireless: forward result: \(forwardResult.output)")
-
-                DispatchQueue.main.async {
-                    self.adbStatus = "Connecting stream..."
-                    LogManager.shared.log("ADB Wireless: Tunnel ready via existing WiFi — connecting to localhost:51820")
-                    self.connectADBTunnel(displayName: "Android (WiFi ADB)")
-
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        self.adbStatus = "Wireless ADB active"
-                        self.adbInProgress = false
-                    }
-                }
-                return
-            }
-
-            // No WiFi ADB — need USB device to do the handoff
-            guard !usbLines.isEmpty else {
-                DispatchQueue.main.async {
-                    self.adbStatus = "No USB or WiFi device found"
-                    self.adbInProgress = false
-                    LogManager.shared.log("ADB Wireless: No USB or WiFi ADB device connected")
-                }
-                return
-            }
-
-            let serial = usbLines[0].components(separatedBy: "\t").first ?? ""
-            DispatchQueue.main.async {
-                self.adbStatus = "Found: \(serial)"
-                LogManager.shared.log("ADB Wireless: Found USB device \(serial)")
-            }
-
-            // 2. Get device IP over USB (pass serial to avoid "more than one device" error)
-            guard let deviceIP = self.getDeviceIP(serial: serial) else {
-                DispatchQueue.main.async {
-                    self.adbStatus = "Cannot get device IP"
-                    self.adbInProgress = false
-                    LogManager.shared.log("ADB Wireless: Failed to get device IP via 'ip route'")
-                }
-                return
-            }
-
-            DispatchQueue.main.async {
-                self.adbStatus = "Device IP: \(deviceIP)"
-                LogManager.shared.log("ADB Wireless: Device IP is \(deviceIP)")
-            }
-
-            // 3. Disconnect existing ADB connection first (tcpip will kill USB tunnel anyway)
-            DispatchQueue.main.async {
-                self.adbStatus = "Switching to wireless — disconnecting USB..."
-                let adbNames = ["Android (USB)", "Android (WiFi ADB)", "localhost:51820"]
-                for name in adbNames {
-                    if let entry = self.pipelines.first(where: { $0.value.service.name == name }) {
-                        self.removeConnection(entry.key)
-                        LogManager.shared.log("ADB Wireless: Disconnected existing '\(name)' before switching")
-                    }
-                }
-            }
-            Thread.sleep(forTimeInterval: 0.5)
-
-            // 4. Enable TCP/IP mode on device
-            DispatchQueue.main.async {
-                self.adbStatus = "Switching to wireless — enabling TCP mode..."
-                LogManager.shared.log("ADB Wireless: Running 'adb tcpip 5555'...")
-            }
-            let tcpipResult = self.runAdb(["-s", serial, "tcpip", "5555"])
-            LogManager.shared.log("ADB Wireless: tcpip result: \(tcpipResult.output)")
-
-            // Wait for ADB daemon to restart
-            Thread.sleep(forTimeInterval: 3.0)
-
-            // 5. Connect to device over WiFi
-            DispatchQueue.main.async {
-                self.adbStatus = "Switching to wireless — connecting \(deviceIP)..."
-                LogManager.shared.log("ADB Wireless: Connecting to \(deviceIP):5555...")
-            }
-
-            var connected = false
-            for attempt in 1...10 {
-                let connectResult = self.runAdb(["connect", "\(deviceIP):5555"])
-                LogManager.shared.log("ADB Wireless: connect attempt \(attempt): \(connectResult.output)")
-                if connectResult.output.contains("connected") {
-                    connected = true
-                    break
-                }
-                Thread.sleep(forTimeInterval: 1.5)
-            }
-
-            guard connected else {
-                DispatchQueue.main.async {
-                    self.adbStatus = "WiFi connect failed — check WiFi"
-                    self.adbInProgress = false
-                    LogManager.shared.log("ADB Wireless: Failed to connect over WiFi after 10 attempts")
-                }
-                return
-            }
-
-            // 6. Set up port forwarding (through the WiFi ADB connection)
-            DispatchQueue.main.async {
-                self.adbStatus = "Switching to wireless — setting up tunnel..."
-                LogManager.shared.log("ADB Wireless: Setting up port forward on \(deviceIP):5555...")
-            }
-            let forwardResult = self.runAdb(["-s", "\(deviceIP):5555", "forward", "tcp:51820", "tcp:51820"])
-            LogManager.shared.log("ADB Wireless: forward result: \(forwardResult.output)")
-
-            // 7. Connect sender to localhost:51820 (tunneled through WiFi ADB)
-            DispatchQueue.main.async {
-                self.adbStatus = "Connecting stream..."
-                LogManager.shared.log("ADB Wireless: Tunnel ready — connecting to localhost:51820")
-                self.connectADBTunnel(displayName: "Android (WiFi ADB)")
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    self.adbStatus = "Wireless ADB active"
-                    self.adbInProgress = false
-                    LogManager.shared.log("ADB Wireless: Setup complete — streaming via WiFi ADB tunnel")
-                }
-            }
-        }
-    }
-
-    /// Quick ADB USB-only: just forward port and connect (no wireless handoff)
-    func connectADBUSB() {
-        adbStatus = "Forwarding port..."
-        LogManager.shared.log("ADB USB: Setting up port forward...")
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-
-            // Find USB device serial (filter out wireless connections which contain ":")
-            let devices = self.runAdb(["devices"])
-            let usbLines = devices.output.components(separatedBy: "\n").filter {
-                $0.contains("\tdevice") && !$0.contains(":")
-            }
-            let serial = usbLines.first?.components(separatedBy: "\t").first
-
-            // Use -s serial if available (handles multiple-device case)
-            let deviceArgs: [String] = serial.map { ["-s", $0] } ?? []
-            let forwardResult = self.runAdb(deviceArgs + ["forward", "tcp:51820", "tcp:51820"])
-            LogManager.shared.log("ADB USB: forward result: \(forwardResult.output)")
-
-            DispatchQueue.main.async {
-                self.adbStatus = "Connecting..."
-                self.connectADBTunnel(displayName: "Android (USB)")
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self.adbStatus = "USB ADB active"
-                    LogManager.shared.log("ADB USB: Connected via USB tunnel")
-                }
-            }
-        }
-    }
-
-    /// Connect to ADB-forwarded port with a proper device name that shows in the device list
-    private func connectADBTunnel(displayName: String) {
-        guard let port = NWEndpoint.Port(rawValue: BCConstants.tcpPort) else { return }
-        let endpoint = NWEndpoint.hostPort(
-            host: NWEndpoint.Host("localhost"),
-            port: port
-        )
-        let service = DiscoveredService(name: displayName, endpoint: endpoint)
-
-        // Add to foundServices so it shows in the device list
-        let serviceKey = deviceKey(for: displayName)
-        if !foundServices.contains(where: { deviceKey(for: $0.name) == serviceKey }) {
-            foundServices.append(service)
-        }
-
-        let tcpOptions = NWProtocolTCP.Options()
-        tcpOptions.enableKeepalive = true
-        tcpOptions.noDelay = true
-        let parameters = NWParameters(tls: nil, tcp: tcpOptions)
-        parameters.serviceClass = .interactiveVideo
-
-        LogManager.shared.log("Sender: ADB connect '\(displayName)' via localhost:51820")
-        connectWithParameters(service: service, parameters: parameters, forceTCP: true, routeIntent: .loopback)
-    }
-
-    private func connectWithParameters(
-        service: DiscoveredService,
-        parameters: NWParameters,
-        forceTCP: Bool = false,
-        routeIntent: ConnectionRouteIntent = .automatic
-    ) {
-        let serviceKey = deviceKey(for: service.name)
-        if connectedServices.contains(where: { deviceKey(for: $0.name) == serviceKey }) {
-            LogManager.shared.log("Sender: Already connected to \(service.name)")
-            return
-        }
-        if connectingServiceNames.contains(serviceKey) {
-            LogManager.shared.log("Sender: Already connecting to \(service.name) — ignoring duplicate")
-            return
-        }
-
-        // Mark as connecting to prevent auto-connect races during retry
-        connectingServiceNames.insert(serviceKey)
-
-        let deviceCount = pipelines.count + 1
-        setPhase(.connecting, "Connecting to \(service.name) (Device #\(deviceCount))...")
-
-        let connection = NWConnection(to: service.endpoint, using: parameters)
-        let connectionId = UUID()
-        pendingConnections[connectionId] = connection
-
-        // This path is the destination of every fallback, so it is the last
-        // thing standing between a bad route and a permanently stuck device.
-        // `NWConnection` parks in `.waiting` instead of failing when no route
-        // is available, which would hold the per-device reservation forever and
-        // make the device unconnectable until the app restarted.
-        var settled = false
-        let timeoutWork = DispatchWorkItem { [weak self] in
-            guard let self, !settled else { return }
-            settled = true
-            guard self.pipelines[connectionId] == nil else { return }
-
-            LogManager.shared.log(
-                "Sender: Connection to \(service.name) timed out after \(Int(Self.fallbackConnectTimeout))s on the fallback route"
+        let requestedPreference = interfacePreference
+        guard let plan = planConnection(to: service, preference: requestedPreference) else {
+            connectingServiceNames.remove(serviceKey)
+            setPhase(
+                .failed,
+                "\(requestedPreference.label) unavailable — receiver was not discovered on that interface"
             )
-            self.connectingServiceNames.remove(serviceKey)
+            LogManager.shared.log(
+                "Sender: Refusing \(requestedPreference.label) connection to \(service.name); "
+                    + "Bonjour evidence was \(service.interfaceSummary)"
+            )
+            return
+        }
+
+        connectingServiceNames.insert(serviceKey)
+        let deviceCount = pipelines.count + 1
+        setPhase(
+            .connecting,
+            "Connecting to \(service.name) via \(requestedPreference.label) (Device #\(deviceCount))..."
+        )
+
+        if let requiredInterface = plan.requiredInterface {
+            LogManager.shared.log(
+                "Sender: Requiring \(requestedPreference.label) interface "
+                    + "\(requiredInterface.name)[\(requiredInterface.type)] for \(service.name)"
+            )
+        } else {
+            LogManager.shared.log("Sender: Auto route for \(service.name); system may choose any discovered path")
+        }
+
+        let connection = NWConnection(to: service.endpoint, using: plan.parameters)
+        let connectionId = UUID()
+        pendingConnections[connectionId] = connection
+        let attemptState = ConnectionAttemptState()
+
+        let timeoutWork = DispatchWorkItem { [weak self] in
+            guard let self, self.pipelines[connectionId] == nil, !attemptState.isSettled else { return }
+            attemptState.isSettled = true
             self.pendingConnections.removeValue(forKey: connectionId)
             connection.stateUpdateHandler = nil
             connection.cancel()
-            if self.pipelines.isEmpty {
-                self.setPhase(.failed, "Connection to \(service.name) timed out")
+
+            if requestedPreference == .awdl && attempt < Self.maximumAWDLConnectAttempts {
+                let nextAttempt = attempt + 1
+                self.setPhase(
+                    .connecting,
+                    "AWDL is waking — retrying \(service.name) (\(nextAttempt)/\(Self.maximumAWDLConnectAttempts))..."
+                )
+                LogManager.shared.log(
+                    "Sender: AWDL timed out for \(service.name); retrying "
+                        + "\(nextAttempt)/\(Self.maximumAWDLConnectAttempts)"
+                )
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectRetryBackoff) { [weak self] in
+                    guard let self else { return }
+                    let alreadyConnected = self.pipelines.values.contains {
+                        self.deviceKey(for: $0.service.name) == serviceKey
+                    }
+                    switch ConnectionRetryPolicy.backoffOutcome(
+                        hasReservation: self.connectingServiceNames.contains(serviceKey),
+                        deviceAlreadyConnected: alreadyConnected
+                    ) {
+                    case .abandonSuperseded:
+                        return
+                    case .releaseReservation:
+                        self.connectingServiceNames.remove(serviceKey)
+                    case .proceedWithRetry:
+                        self.connect(to: service, attempt: nextAttempt)
+                    }
+                }
+                return
             }
+
+            self.connectingServiceNames.remove(serviceKey)
+            self.setPhase(
+                .failed,
+                "\(requestedPreference.label) could not reach \(service.name)"
+            )
+            LogManager.shared.log(
+                "Sender: \(requestedPreference.label) connection to \(service.name) timed out; "
+                    + "strict modes do not fall back to another interface"
+            )
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fallbackConnectTimeout, execute: timeoutWork)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectTimeout, execute: timeoutWork)
 
         connection.stateUpdateHandler = { [weak self] state in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+
                 switch state {
                 case .ready:
-                    settled = true
                     timeoutWork.cancel()
-                    guard let self else { return }
-                    let route = self.classifyConnectionRoute(
-                        path: connection.currentPath,
-                        intent: routeIntent
-                    )
+                    let route = self.classifyConnectionRoute(path: connection.currentPath, intent: plan.intent)
                     self.logConnectionRoute(route, path: connection.currentPath)
-
                     self.authenticateAndActivateConnection(
                         connection,
                         connectionId: connectionId,
                         service: service,
                         streamEndpoint: service.endpoint,
                         isP2P: route.isP2P,
-                        isLoopback: route.isLoopback,
                         isWiredCable: route.isWiredCable,
-                        forceTCP: forceTCP
+                        requestedPreference: requestedPreference,
+                        requiredInterface: plan.requiredInterface
                     )
-                case .failed(let error):
-                    settled = true
-                    timeoutWork.cancel()
-                    LogManager.shared.log("Sender: Connection to \(service.name) failed: \(error)")
-                    self?.connectingServiceNames.remove(serviceKey)
-                    self?.pendingConnections.removeValue(forKey: connectionId)
-                    self?.removeConnection(connectionId, attemptReconnect: true, reason: "transport failed: \(error)")
 
-                    let remaining = self?.pipelines.count ?? 0
-                    if remaining == 0 {
-                        // scheduleReconnect (if triggered above) immediately moves
-                        // the phase to .reconnecting after this.
-                        if self?.connectionPhase != .reconnecting {
-                            self?.setPhase(.failed, "Connection failed")
-                        }
-                    } else {
-                        self?.setPhase(.connected, "Connected to \(remaining) device(s)")
-                    }
-                case .waiting(let error):
-                    self?.setPhase(.connecting, "Waiting for \(service.name)... (\(error.localizedDescription))")
-                case .cancelled:
-                    settled = true
+                case .failed(let error):
                     timeoutWork.cancel()
-                    self?.connectingServiceNames.remove(serviceKey)
-                    self?.pendingConnections.removeValue(forKey: connectionId)
+                    self.connectingServiceNames.remove(serviceKey)
+                    self.pendingConnections.removeValue(forKey: connectionId)
+                    self.setPhase(.failed, "\(requestedPreference.label) connection failed")
+                    LogManager.shared.log(
+                        "Sender: \(requestedPreference.label) connection to \(service.name) failed: \(error)"
+                    )
+
+                case .waiting(let error):
+                    self.setPhase(
+                        .connecting,
+                        "Waiting for \(requestedPreference.label) route to \(service.name)… (\(error.localizedDescription))"
+                    )
+
+                case .cancelled:
+                    timeoutWork.cancel()
+                    if ConnectionRetryPolicy.shouldReleaseReservationOnCancel(
+                        cancelledForRetry: attemptState.isSettled
+                    ) {
+                        self.connectingServiceNames.remove(serviceKey)
+                    }
+                    self.pendingConnections.removeValue(forKey: connectionId)
+
                 default:
                     break
                 }
@@ -4683,6 +4002,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
     
+    @MainActor
     func quitApp() {
         NSApplication.shared.terminate(nil)
     }
@@ -4769,9 +4089,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         guard !displayRebuilds.isEmpty else { return }
         // A display mode, backing size, or HiDPI change genuinely requires a
         // virtual display rebuild. Quality and audio changes never come here.
+        let scheduledRebuilds = displayRebuilds
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let self = self else { return }
-            for rebuild in displayRebuilds where self.pipelines[rebuild.id] != nil {
+            for rebuild in scheduledRebuilds where self.pipelines[rebuild.id] != nil {
                 self.startPipeline(for: rebuild.id, expectedGeneration: rebuild.generation)
             }
         }
@@ -4780,11 +4101,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private func effectiveBitrate(for pipeline: ConnectionPipeline) -> Int {
         if pipeline.isP2P || pipeline.isWiredCable {
             return selectedQuality.rawValue
-        }
-        if pipeline.isLoopback {
-            return pipeline.isWiFiADB
-                ? min(selectedQuality.rawValue, 10_000_000)
-                : selectedQuality.rawValue
         }
         return min(selectedQuality.rawValue, StreamQuality.high.rawValue)
     }
@@ -4854,7 +4170,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let serviceName = pipeline.service.name
         pipelines[connectionID]?.mediaHeartbeatInProgress = true
         connection.send(content: packet, completion: .contentProcessed { [weak self] error in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self,
                       self.pipelines[connectionID]?.connection === connection else { return }
                 self.pipelines[connectionID]?.mediaHeartbeatInProgress = false
@@ -4935,8 +4251,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         pipeline.virtualDisplayManager?.destroyDisplay()
         let didSendDisconnectNotice = sendDisconnectNotice(for: pipeline)
         if didSendDisconnectNotice {
+            let connection = pipeline.connection
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                pipeline.connection.cancel()
+                connection.cancel()
             }
         } else {
             pipeline.connection.cancel()
@@ -4973,11 +4290,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         packet.append(Data(bytes: &lengthPrefix, count: 4))
         packet.append(payload)
 
+        let serviceName = pipeline.service.name
         pipeline.connection.send(content: packet, completion: .contentProcessed { error in
             if let error {
-                LogManager.shared.log("Sender: Disconnect notice to \(pipeline.service.name) failed: \(error.localizedDescription)")
+                LogManager.shared.log("Sender: Disconnect notice to \(serviceName) failed: \(error.localizedDescription)")
             } else {
-                LogManager.shared.log("Sender: Sent disconnect notice to \(pipeline.service.name)")
+                LogManager.shared.log("Sender: Sent disconnect notice to \(serviceName)")
             }
         })
         return true
@@ -5053,7 +4371,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 displayBounds: bounds,
                 audioEnabled: connectedDisplays.first(where: { $0.id == id })?.audioEnabled ?? audioStreamingEnabled,
                 audioState: pipeline.audioState,
-                cgDisplayID: pipeline.virtualDisplayManager?.displayID
+                cgDisplayID: pipeline.virtualDisplayManager?.displayID,
+                requestedRoute: pipeline.requestedRoute,
+                systemPath: pipeline.systemPath,
+                routeEvidence: pipeline.routeEvidence,
+                hasVerifiedRouteEvidence: pipeline.hasVerifiedRouteEvidence
             )
         }
     }
@@ -5087,7 +4409,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 if case let NWError.posix(code) = error,
                    (code == .ECONNRESET || code == .ENOTCONN || code == .ECANCELED) {
                     LogManager.shared.log("Sender: Receive error (fatal): \(error)")
-                    DispatchQueue.main.async {
+                    DispatchQueue.main.async { [weak self] in
                         self?.removeConnection(connectionId, attemptReconnect: true, reason: "receive error: \(error)")
                     }
                     return
@@ -5102,7 +4424,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             // 15s heartbeat timeout and kept re-arming receives on a finished stream.
             if isComplete {
                 LogManager.shared.log("Sender: Receiver closed the control stream")
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
                     self?.removeConnection(connectionId, attemptReconnect: true, reason: "peer closed connection")
                 }
                 return
@@ -5118,25 +4440,25 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     bodyLength = try StreamFraming.validateBodyLength(rawLength, limit: StreamFraming.maxControlFrameBytes)
                 } catch {
                     LogManager.shared.log("Sender: Rejected control frame length \(rawLength) (\(error)) — closing connection")
-                    DispatchQueue.main.async {
+                    DispatchQueue.main.async { [weak self] in
                         self?.removeConnection(connectionId, attemptReconnect: false, reason: "invalid control frame length")
                     }
                     return
                 }
 
-                connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { body, bodyContext, bodyComplete, bodyError in
+                connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { [weak self] body, bodyContext, bodyComplete, bodyError in
                     if bodyError != nil || (body?.count ?? 0) != bodyLength {
                         // A short body means the stream ended mid-frame; anything we
                         // decoded from it would be garbage.
                         LogManager.shared.log("Sender: Control frame truncated (expected \(bodyLength), got \(body?.count ?? 0))")
-                        DispatchQueue.main.async {
+                        DispatchQueue.main.async { [weak self] in
                             self?.removeConnection(connectionId, attemptReconnect: true, reason: "truncated control frame")
                         }
                         return
                     }
 
                     // All pipelines access must happen on main thread to avoid dictionary races
-                    DispatchQueue.main.async {
+                    DispatchQueue.main.async { [weak self] in
                         guard let self = self, let body = body, let pipeline = self.pipelines[connectionId] else { return }
 
                         do {
@@ -5205,7 +4527,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] content, _, isComplete, error in
             if let error {
                 LogManager.shared.log("AudioConnection: Receive error: \(error)")
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
                     self?.handleAudioConnectionEnded(
                         connection,
                         connectionId: connectionId,
@@ -5217,7 +4539,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
             guard let content, content.count == 4 else {
                 if isComplete {
-                    DispatchQueue.main.async {
+                    DispatchQueue.main.async { [weak self] in
                         self?.handleAudioConnectionEnded(
                             connection,
                             connectionId: connectionId,
@@ -5238,7 +4560,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             } catch {
                 LogManager.shared.log("AudioConnection: Rejected frame length \(rawLength) (\(error)) — dropping auxiliary connection")
                 connection.cancel()
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
                     self?.handleAudioConnectionEnded(
                         connection,
                         connectionId: connectionId,
@@ -5252,7 +4574,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 if bodyError != nil || (body?.count ?? 0) != bodyLength {
                     LogManager.shared.log("AudioConnection: Frame truncated (expected \(bodyLength), got \(body?.count ?? 0))")
                     connection.cancel()
-                    DispatchQueue.main.async {
+                    DispatchQueue.main.async { [weak self] in
                         self?.handleAudioConnectionEnded(
                             connection,
                             connectionId: connectionId,
@@ -5262,7 +4584,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     return
                 }
 
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
                     guard let self,
                           let body,
                           let pipeline = self.pipelines[connectionId],
@@ -5281,11 +4603,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 self?.receiveAuxiliary(on: connection, connectionId: connectionId)
             }
         }
-    }
-
-    private func receiveUDP(on connection: NWConnection, connectionId: UUID) {
-        LogManager.shared.log("Sender: UDP input path disabled in private build")
-        removeConnection(connectionId)
     }
     
     // Handle screen info from iOS receiver (command 777)
@@ -5363,7 +4680,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Sender: Creating virtual display for \(serviceName)...")
             let displayManager = VirtualDisplayManager()
             displayManager.onDisplayBoundsChanged = { [weak self] bounds in
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
                     guard let self,
                           self.pipelines[connectionId]?.lifecycleGeneration == lifecycleGeneration,
                           self.pipelines[connectionId]?.virtualDisplayManager === displayManager else { return }
@@ -5396,7 +4713,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
                 // Update InputHandler with this connection's display bounds
                 // Retry with increasing delays — macOS may take time to register the virtual display
-                func pollDisplayBounds(attempt: Int) {
+                @Sendable func pollDisplayBounds(attempt: Int) {
                     guard self.pipelines[connectionId]?.lifecycleGeneration == lifecycleGeneration,
                           self.pipelines[connectionId]?.virtualDisplayManager === displayManager else { return }
                     let bounds = CGDisplayBounds(displayID)
@@ -5455,9 +4772,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             captureHeight = selectedResolution.height * scale
         }
 
-        // Adaptive quality: P2P gets full, loopback (ADB) gets medium-high, infrastructure gets capped
+        // Adaptive quality: verified AWDL/cable links get full quality;
+        // infrastructure and ambiguous Auto paths use the conservative cap.
         let isP2P = pipelines[connectionId]?.isP2P ?? false
-        let isLoopback = pipelines[connectionId]?.isLoopback ?? false
         let isWiredCable = pipelines[connectionId]?.isWiredCable ?? false
         let fps: Int
         let bitrate: Int
@@ -5471,22 +4788,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             bitrate = selectedQuality.rawValue
             keyframeInterval = 10.0
             LogManager.shared.log("Sender: USB/Cable mode — \(fps) FPS / \(bitrate / 1_000_000) Mbps / KF every 10s for \(serviceName)")
-        } else if isLoopback {
-            let isWiFiADB = pipelines[connectionId]?.isWiFiADB ?? false
-            if isWiFiADB {
-                // WiFi ADB — receiver queues all frames (no drops), so 60fps is safe.
-                // Bitrate capped to fit WiFi bandwidth; shorter KF interval for faster recovery.
-                fps = 60
-                bitrate = min(selectedQuality.rawValue, 10_000_000) // Cap at 10 Mbps
-                keyframeInterval = 3.0
-                LogManager.shared.log("Sender: WiFi ADB mode — \(fps) FPS / \(bitrate / 1_000_000) Mbps / KF every 3s for \(serviceName)")
-            } else {
-                // USB ADB — ~280Mbps, plenty of headroom
-                fps = 60
-                bitrate = selectedQuality.rawValue
-                keyframeInterval = 10.0
-                LogManager.shared.log("Sender: USB ADB mode — \(fps) FPS / \(bitrate / 1_000_000) Mbps / KF every 10s for \(serviceName)")
-            }
         } else {
             // Infrastructure (WiFi router, Windows/Linux receivers).
             //
@@ -5672,8 +4973,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
         guard let entry = pipelines.first(where: { $0.value.screenRecorder === recorder }) else { return }
         LogManager.shared.log("Sender: Screen capture did not start for \(entry.value.service.name): \(reason)")
-        DispatchQueue.main.async {
-            self.removeConnection(entry.key)
+        let connectionID = entry.key
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.removeConnection(connectionID)
             // Set after teardown so the failure reason stays visible.
             self.setPhase(.failed, "Screen capture unavailable — check Screen Recording permission")
         }
@@ -5779,94 +5082,29 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Sender: Sending frame #\(encodedFrameCount) (\(data.count) bytes, KF: \(isKeyframe), inFlight: \(pipeline.framesInFlight)/\(self.maxFramesInFlight(for: pipeline))) to \(pipeline.service.name)")
         }
 
-        // Determine if this connection uses TCP framing (ADB/localhost always TCP, else follow global)
-        let useTCP = pipeline.forceTCP || connectionType != "UDP"
-
-        if !useTCP {
-            let mtu = 1000
-            let headerSize = 8
-            let maxPayload = mtu - headerSize
-
-            udpFrameId &+= 1
-            let thisFrameId = udpFrameId
-
-            let totalData = data
-            let totalCount = totalData.count
-
-            bytesSentWindow += totalCount
-
-            let totalChunks = UInt16((totalCount + maxPayload - 1) / maxPayload)
-
-            for chunkIndex in 0..<totalChunks {
-                let start = Int(chunkIndex) * maxPayload
-                let end = min(start + maxPayload, totalCount)
-                let chunkData = totalData.subdata(in: start..<end)
-
-                var header = Data()
-                var fid = thisFrameId.bigEndian
-                var cid = chunkIndex.bigEndian
-                var tot = totalChunks.bigEndian
-
-                header.append(Data(bytes: &fid, count: 4))
-                header.append(Data(bytes: &cid, count: 2))
-                header.append(Data(bytes: &tot, count: 2))
-
-                var finalPacket = header
-                finalPacket.append(chunkData)
-
-                let isLargeFrame = totalChunks > 10
-                let pacingMicroseconds: useconds_t = 120
-
-                pipeline.connection.send(content: finalPacket, completion: .contentProcessed { [weak self] error in
-                    if let error = error {
-                        if case let NWError.posix(code) = error {
-                            switch code {
-                            case .ECANCELED:
-                                LogManager.shared.log("Sender: Connection to \(pipeline.service.name) canceled (Device disconnected)")
-                                DispatchQueue.main.async {
-                                    self?.removeConnection(connectionId)
-                                }
-                                return
-                            case .ECONNREFUSED:
-                                LogManager.shared.log("Sender: Connection refused by \(pipeline.service.name)")
-                                return
-                            default:
-                                break
-                            }
-                        }
-                        LogManager.shared.log("Sender: UDP Chunk Error to \(pipeline.service.name): \(error)")
-                    }
-                })
-
-                if isLargeFrame && chunkIndex < totalChunks - 1 {
-                    usleep(pacingMicroseconds)
-                }
-            }
+        // Length-prefixed framing, sent to this connection only.
+        var packet = Data()
+        if pipeline.supportsTypeByte {
+            // Format: [4-byte length][1-byte type: 0x01=video][payload]
+            var typedPayload = Data([0x01])
+            typedPayload.append(data)
+            var lengthPrefix = UInt32(typedPayload.count).bigEndian
+            packet.append(Data(bytes: &lengthPrefix, count: 4))
+            packet.append(typedPayload)
         } else {
-            // TCP: Length-prefixed framing - Send to this connection only
-            var packet = Data()
-            if pipeline.supportsTypeByte {
-                // Format: [4-byte length][1-byte type: 0x01=video][payload]
-                var typedPayload = Data([0x01])
-                typedPayload.append(data)
-                var lengthPrefix = UInt32(typedPayload.count).bigEndian
-                packet.append(Data(bytes: &lengthPrefix, count: 4))
-                packet.append(typedPayload)
-            } else {
-                // Legacy format: [4-byte length][payload] (iOS/Mac Swift receivers)
-                var lengthPrefix = UInt32(data.count).bigEndian
-                packet.append(Data(bytes: &lengthPrefix, count: 4))
-                packet.append(data)
-            }
-
-            enqueueVideoPacket(packet, isKeyframe: isKeyframe, for: connectionId)
+            // Legacy format: [4-byte length][payload] (iOS/Mac Swift receivers)
+            var lengthPrefix = UInt32(data.count).bigEndian
+            packet.append(Data(bytes: &lengthPrefix, count: 4))
+            packet.append(data)
         }
+
+        enqueueVideoPacket(packet, isKeyframe: isKeyframe, for: connectionId)
     }
 
     /// How many video frames may be in flight on this link at once.
     ///
     /// Before backpressure was unified across every transport, USB/Thunderbolt,
-    /// peer-to-peer and loopback links ran with no completion gating at all and
+    /// peer-to-peer links ran with no completion gating at all and
     /// were the most stable paths there were. Gating them at a single frame
     /// capped throughput at one frame per round trip and produced drops on a
     /// link that was not actually congested — which then pulled the adaptive
@@ -5875,8 +5113,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private func maxFramesInFlight(for pipeline: ConnectionPipeline) -> Int {
         VideoFlightWindowPolicy.maxFramesInFlight(
             isP2P: pipeline.isP2P,
-            isWiredCable: pipeline.isWiredCable,
-            isLoopback: pipeline.isLoopback
+            isWiredCable: pipeline.isWiredCable
         )
     }
 
@@ -5906,7 +5143,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let startedAt = DispatchTime.now().uptimeNanoseconds
 
         connection.send(content: packet, completion: .contentProcessed { [weak self] error in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 self?.finishVideoSend(
                     on: connection,
                     connectionId: connectionId,
@@ -6062,7 +5299,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         bytesSentWindow += packet.count
         let serviceName = pipeline.service.name
         connection.send(content: packet, completion: .contentProcessed { [weak self] error in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 self?.finishAudioSend(
                     on: connection,
                     connectionId: connectionId,

@@ -58,8 +58,8 @@ cd screenbridge
 2. Move `ScreenBridge.app` to `/Applications` if you built the app bundle.
 3. Open ScreenBridge and save a pairing code in Settings.
 4. Keep `Use as` set to **Extended Display**.
-5. Choose `Auto`, `Force P2P (WiFi Direct)`, `Force Router/WiFi`, or
-   `USB / Thunderbolt Cable` according to the path you want to test.
+5. Choose `Auto`, `Require Cable`, `AWDL`, or `Wi-Fi` according to the path you
+   want to use. Strict modes never silently fall back to another interface.
 6. Grant **Screen Recording** when macOS asks. Grant **Audio Recording** only
    when Chrome audio routing is enabled.
 
@@ -110,7 +110,8 @@ cd screenbridge
 
 - Discovers receivers through Bonjour service `_yc-cast._tcp`.
 - Authenticates before the Mac creates the capture and streaming pipeline.
-- Supports Auto, Apple P2P/AWDL, Router/Wi-Fi, and USB/Thunderbolt-style paths.
+- Supports Auto plus strict AWDL, Wi-Fi, and cable routes backed by Bonjour
+  interface evidence.
 - Uses bounded backpressure, adaptive bitrate, keyframe requests, and bounded
   reconnect attempts after unexpected wireless drops.
 - Tracks discovery, connecting, authenticating, connected, reconnecting, and
@@ -151,20 +152,19 @@ cannot create or join a stale video session.
 
 ScreenBridge exposes four transport preferences:
 
-- `Auto (Apple Default)` lets Network.framework choose the best available path
-  and can fall back when peer-to-peer networking is unavailable.
-- `Force P2P (WiFi Direct)` asks macOS and iPadOS to use Apple AWDL peer-to-peer
-  networking when that link is available.
-- `Force Router/WiFi` uses the normal infrastructure Wi-Fi path through the
-  local network.
-- `USB / Thunderbolt Cable` disables Wi-Fi/P2P for new connections and asks the
-  system to use a wired-style path such as iPad USB networking, Ethernet, or
-  Thunderbolt Bridge.
+- `Auto` lets Network.framework choose among the receiver's available paths.
+- `Require Cable` requires the exact wired interface on which Bonjour observed
+  the receiver. It reports failure instead of silently switching to Wi-Fi.
+- `AWDL` requires the receiver's Bonjour result on an `awdl`/`llw` interface.
+- `Wi-Fi` requires an infrastructure Wi-Fi Bonjour interface and disables
+  peer-to-peer routing.
 
-Prefer `USB / Thunderbolt Cable` when a usable cable path is available. For
-wireless use, keep the devices nearby and try `Force P2P (WiFi Direct)` before
-falling back to router Wi-Fi. The sender log records the selected connection
-class, bitrate adjustments, and disconnect reason.
+The connected-device panel separates the requested route, Network.framework's
+path type, and the concrete Bonjour interface evidence. The iPad listener
+prefers TCP port 51820, falls back to a dynamic port only when that port is in
+use, and continues to advertise the actual endpoint through Bonjour. Receiver
+settings can export a bounded diagnostics log with listener, service, path,
+interface, and disconnect events.
 
 ## Usage
 
@@ -391,7 +391,7 @@ from the source tag alone.
 
 The shared test suite currently covers pairing, Keychain storage, framing,
 AVCC parsing, session roles, reconnect policy, media liveness, and bounded
-video delivery. The latest local run completed 88 tests with 0 failures.
+video delivery. The latest local shared-suite run completed with 0 failures.
 
 The following remain outside the current automated evidence boundary:
 

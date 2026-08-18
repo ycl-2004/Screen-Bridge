@@ -32,7 +32,13 @@ public enum AdaptiveBitratePolicy {
            sendLatencyEWMA > 0,
            sendLatencyEWMA <= 0.015,
            current < upperBound {
-            return min(upperBound, current + max(1_000_000, current / 10))
+            // Climb 20% per step instead of 10%. Recovery used to take ~30s to
+            // get from 7 to 12 Mbps, so a burst arriving mid-climb met a bitrate
+            // far below what the link could carry and its frames were dropped.
+            // Kept exactly at the 20% backoff rate and no higher: climbing
+            // faster than the loop retreats is how a controller starts
+            // oscillating instead of settling.
+            return min(upperBound, current + max(1_000_000, current / 5))
         }
 
         return current

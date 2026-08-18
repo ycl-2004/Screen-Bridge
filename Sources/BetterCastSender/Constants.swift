@@ -10,12 +10,8 @@ enum BCConstants {
     /// Standard TCP port for the private Mac-to-iPad video/audio stream.
     static let tcpPort: UInt16 = 51820
 
-    /// Legacy UDP port retained for inactive code paths.
-    static let udpPort: UInt16 = 51821
-
     /// Private Bonjour service type. The private build browses/advertises TCP only.
     static let tcpServiceType = PrivateBetterCastConstants.serviceType
-    static let udpServiceType = PrivateBetterCastConstants.serviceType
 
     // MARK: - Audio
     /// AAC-LC frame size in samples. Required by the AAC encoder/decoder.
@@ -34,10 +30,6 @@ enum BCConstants {
     /// macOS TCC reset utility — used to reset Screen Recording permissions.
     static let tccutilPath = "/usr/bin/tccutil"
 
-    /// Android Debug Bridge (ADB) executable path. Installed via Android Studio
-    /// platform-tools; users without it get a friendly error.
-    static let adbPath = "/usr/local/bin/adb"
-
     // MARK: - Display Defaults
     /// Default logical long edge for receiver-matched virtual displays.
     /// A 2360 x 1640 iPad becomes a 1344 x 934 HiDPI display, with native-pixel capture.
@@ -45,9 +37,4 @@ enum BCConstants {
 
     /// HiDPI scale for receiver-matched virtual displays.
     static let defaultReceiverVirtualDisplayScale = 2
-
-    /// Default Android screen size when device hasn't reported its dimensions yet.
-    /// Matches a typical phone resolution in landscape.
-    static let defaultAndroidWidth = 1080
-    static let defaultAndroidHeight = 2400
 }

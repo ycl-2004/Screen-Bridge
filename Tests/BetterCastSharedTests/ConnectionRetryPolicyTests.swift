@@ -5,39 +5,9 @@ import XCTest
 /// to be diagnosed from device logs. Each test names the failure it prevents.
 final class ConnectionRetryPolicyTests: XCTestCase {
 
-    // MARK: - Retry budget
-
-    func testColdLinkRetriesUpToTheBudget() {
-        for attempt in 1..<ConnectionRetryPolicy.maximumAttempts {
-            XCTAssertEqual(
-                ConnectionRetryPolicy.decision(attempt: attempt, canFallBackToInfrastructure: false),
-                .retry(attempt: attempt + 1, afterSeconds: ConnectionRetryPolicy.backoffSeconds),
-                "attempt \(attempt) should still retry"
-            )
-        }
-    }
-
-    /// A single retry was not enough for a cold USB/Thunderbolt link: it needed
-    /// three dials, and the user had to click Connect again by hand.
-    func testBudgetCoversTheObservedThreeDialCableWarmUp() {
-        XCTAssertGreaterThanOrEqual(ConnectionRetryPolicy.maximumAttempts, 3)
-    }
-
-    func testRetriesStopAtTheBudget() {
-        XCTAssertEqual(
-            ConnectionRetryPolicy.decision(
-                attempt: ConnectionRetryPolicy.maximumAttempts,
-                canFallBackToInfrastructure: false
-            ),
-            .fail
-        )
-    }
-
-    func testAutoModePrefersInfrastructureFallbackOverRetrying() {
-        XCTAssertEqual(
-            ConnectionRetryPolicy.decision(attempt: 1, canFallBackToInfrastructure: true),
-            .fallBackToInfrastructure
-        )
+    /// A radio can be asleep, so a cold peer-to-peer dial deserves retries.
+    func testRadioLinksGetRetryBudget() {
+        XCTAssertGreaterThanOrEqual(ConnectionRetryPolicy.maximumAWDLAttempts, 3)
     }
 
     /// Dialing again immediately kept the receiver's pending-handshake slots
@@ -69,7 +39,7 @@ final class ConnectionRetryPolicyTests: XCTestCase {
     /// The retry is a continuation of the attempt that already holds the
     /// reservation, so it must not be rejected by its own bookkeeping.
     func testRetryIsNeverRejectedByItsOwnReservation() {
-        for attempt in 2...ConnectionRetryPolicy.maximumAttempts {
+        for attempt in 2...ConnectionRetryPolicy.maximumAWDLAttempts {
             XCTAssertTrue(
                 ConnectionRetryPolicy.shouldAcceptConnect(attempt: attempt, hasReservation: true),
                 "retry \(attempt) must proceed"

@@ -4,6 +4,14 @@ import VideoToolbox
 import CoreMedia
 import BetterCastShared
 
+private final class VideoDecoderTransfer<Value>: @unchecked Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+}
+
 protocol VideoDecoderDelegate: AnyObject {
     func didDecode(sampleBuffer: CMSampleBuffer)
     /// Called when a frame fails to decode (e.g. broken reference chain after a
@@ -26,7 +34,7 @@ private final class VideoDecoderCallbackContext {
     }
 }
 
-class VideoDecoder {
+final class VideoDecoder: @unchecked Sendable {
     
     weak var delegate: VideoDecoderDelegate?
     private var decompressionSession: VTDecompressionSession?
@@ -340,9 +348,10 @@ class VideoDecoder {
         )
 
         guard let sampleBuffer else { return }
+        let transferredSample = VideoDecoderTransfer(sampleBuffer)
         DispatchQueue.main.async { [weak self] in
             guard let self, self.currentGeneration() == callbackGeneration else { return }
-            self.delegate?.didDecode(sampleBuffer: sampleBuffer)
+            self.delegate?.didDecode(sampleBuffer: transferredSample.value)
         }
     }
 

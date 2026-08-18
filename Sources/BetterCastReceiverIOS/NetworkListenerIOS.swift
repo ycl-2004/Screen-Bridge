@@ -5,6 +5,14 @@ import Network
 import CoreMedia
 import BetterCastShared
 
+private final class ReceiverTransfer<Value>: @unchecked Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+}
+
 /// Single source of truth for the receiver's connection state.
 /// The status text is derived alongside it for display.
 enum ReceiverState {
@@ -16,17 +24,18 @@ enum ReceiverState {
     case disconnected   // sender ended the session cleanly
 }
 
+@MainActor
 protocol NetworkListenerDelegate: AnyObject {
     func networkListener(_ listener: NetworkListenerIOS, didUpdate state: ReceiverState, statusText: String)
     func networkListener(_ listener: NetworkListenerIOS, didReceiveInput event: InputEvent) // If we were receiving input
 }
 
-class NetworkListenerIOS {
+final class NetworkListenerIOS: @unchecked Sendable {
     weak var delegate: NetworkListenerDelegate?
 
-    private var tcpListener: NWListener?       // Wi-Fi — reachable by all devices
-    private var tcpP2PListener: NWListener?    // AWDL — low-latency for Apple devices
-    private var udpListener: NWListener?
+    /// The only listener this build runs. Declared with peer-to-peer enabled,
+    /// which still accepts connections over ordinary interfaces as well.
+    private var tcpP2PListener: NWListener?
 
     /// One logical receiver session owns one media/control connection and may
     /// attach one auxiliary audio connection. Auxiliary transport state must
@@ -44,14 +53,7 @@ class NetworkListenerIOS {
     
     private let networkQueue = DispatchQueue(label: "com.bettercast.network.ios", qos: .userInteractive)
     
-    // UDP Reassembly
-    private var udpBuffer: [UInt32: (total: Int, chunks: [UInt16: Data], time: Date)] = [:]
-    private let udpLock = NSLock()
-    private var lastDecodedFrameId: UInt32 = 0
     private var lastKeyframeRequest = Date.distantPast
-    
-    // Stats
-    private var udpPacketsReceived = 0
     
     // Heartbeat
     private var heartbeatTimer: Timer?
@@ -77,6 +79,9 @@ class NetworkListenerIOS {
     private var isStarted = false
     private var privateListenerRetryAttempt = 0
     private var privateListenerRestartWork: DispatchWorkItem?
+    private var useDynamicPortForNextListener = false
+    private var activeListenerUsesDynamicPort = false
+    private static let preferredPortNumber: UInt16 = 51820
 
     private let capabilitiesLock = NSLock()
     private var receiverCapabilities: ReceiverCapabilities?
@@ -121,7 +126,7 @@ class NetworkListenerIOS {
 
     /// Revoke the complete logical session and stop accepting new connections.
     /// The listener starts again only after the user stores a new pairing code.
-    func resetPairingSession(completion: (() -> Void)? = nil) {
+    func resetPairingSession(completion: (@MainActor @Sendable () -> Void)? = nil) {
         networkQueue.async { [weak self] in
             guard let self else { return }
             self.isStarted = false
@@ -129,18 +134,13 @@ class NetworkListenerIOS {
             self.privateListenerRestartWork = nil
             self.privateListenerRetryAttempt = 0
 
-            self.tcpListener?.stateUpdateHandler = nil
             self.tcpP2PListener?.stateUpdateHandler = nil
-            self.udpListener?.stateUpdateHandler = nil
-            self.tcpListener?.newConnectionHandler = nil
             self.tcpP2PListener?.newConnectionHandler = nil
-            self.udpListener?.newConnectionHandler = nil
-            self.tcpListener?.cancel()
+            self.tcpP2PListener?.serviceRegistrationUpdateHandler = nil
             self.tcpP2PListener?.cancel()
-            self.udpListener?.cancel()
-            self.tcpListener = nil
             self.tcpP2PListener = nil
-            self.udpListener = nil
+            self.useDynamicPortForNextListener = false
+            self.activeListenerUsesDynamicPort = false
 
             var connectionsByID = self.pendingConnections
             if let main = self.mainConnection {
@@ -202,7 +202,7 @@ class NetworkListenerIOS {
         guard isStarted else { return }
         guard tcpP2PListener == nil else { return }
         let deviceName = UserDefaults.standard.string(forKey: "customDeviceName")
-            ?? UIDevice.current.name
+            ?? ProcessInfo.processInfo.hostName
 
         do {
             let tcpOptions = NWProtocolTCP.Options()
@@ -212,17 +212,41 @@ class NetworkListenerIOS {
             p2pParams.includePeerToPeer = true
             p2pParams.serviceClass = .interactiveVideo
 
-            let p2pListener = try NWListener(using: p2pParams)
+            let requestedPort: NWEndpoint.Port
+            if useDynamicPortForNextListener {
+                requestedPort = .any
+                activeListenerUsesDynamicPort = true
+            } else if let fixedPort = NWEndpoint.Port(rawValue: Self.preferredPortNumber) {
+                requestedPort = fixedPort
+                activeListenerUsesDynamicPort = false
+            } else {
+                LogManager.shared.log("ReceiverIOS: Invalid preferred port \(Self.preferredPortNumber); using a dynamic port")
+                requestedPort = .any
+                activeListenerUsesDynamicPort = true
+            }
+
+            let p2pListener = try NWListener(using: p2pParams, on: requestedPort)
             p2pListener.service = NWListener.Service(
                 name: "\(deviceName) Private",
                 type: PrivateBetterCastConstants.serviceType
             )
 
+            p2pListener.serviceRegistrationUpdateHandler = { change in
+                switch change {
+                case .add(let endpoint):
+                    LogManager.shared.log("ReceiverIOS: Bonjour service registered at \(endpoint)")
+                case .remove(let endpoint):
+                    LogManager.shared.log("ReceiverIOS: Bonjour service removed from \(endpoint)")
+                @unknown default:
+                    LogManager.shared.log("ReceiverIOS: Unknown Bonjour registration change")
+                }
+            }
+
             p2pListener.stateUpdateHandler = { [weak self] state in
                 self?.handleListenerState(state, type: "TCP-P2P")
             }
             p2pListener.newConnectionHandler = { [weak self] connection in
-                LogManager.shared.log("ReceiverIOS (TCP-P2P): New private AWDL connection")
+                LogManager.shared.log("ReceiverIOS: New connection from \(connection.endpoint)")
                 self?.handleNewConnection(connection, type: "TCP")
             }
 
@@ -230,6 +254,15 @@ class NetworkListenerIOS {
             self.tcpP2PListener = p2pListener
         } catch {
             LogManager.shared.log("ReceiverIOS (TCP-P2P): Error \(error)")
+            if !activeListenerUsesDynamicPort,
+               let networkError = error as? NWError,
+               case .posix(let code) = networkError,
+               code == .EADDRINUSE {
+                useDynamicPortForNextListener = true
+                LogManager.shared.log(
+                    "ReceiverIOS: Preferred port \(Self.preferredPortNumber) could not bind; retrying with a dynamic port"
+                )
+            }
             notifyState(.waiting, "Waiting for network access...")
             schedulePrivateListenerRestart(reason: error.localizedDescription)
         }
@@ -250,96 +283,6 @@ class NetworkListenerIOS {
         privateListenerRestartWork = work
         networkQueue.asyncAfter(deadline: .now() + delay, execute: work)
     }
-
-    private func startTCP() {
-        // Use custom name from settings, fall back to system device name
-        let deviceName = UserDefaults.standard.string(forKey: "customDeviceName")
-            ?? UIDevice.current.name
-
-        // 1. Wi-Fi listener — reachable by ALL devices (Windows, Linux, Android, Mac)
-        do {
-            let tcpOptions = NWProtocolTCP.Options()
-            tcpOptions.enableKeepalive = true
-            tcpOptions.noDelay = true
-            let parameters = NWParameters(tls: nil, tcp: tcpOptions)
-            parameters.serviceClass = .interactiveVideo
-
-            // Try preferred port first for consistency with Mac/Windows receivers
-            var listener: NWListener
-            do {
-                listener = try NWListener(using: parameters, on: 51820)
-            } catch {
-                LogManager.shared.log("ReceiverIOS (TCP): Port 51820 unavailable, using system-assigned port")
-                listener = try NWListener(using: parameters)
-            }
-            listener.service = NWListener.Service(name: deviceName, type: BCConstants.tcpServiceType)
-
-            listener.stateUpdateHandler = { [weak self] state in
-                self?.handleListenerState(state, type: "TCP")
-            }
-            listener.newConnectionHandler = { [weak self] connection in
-                LogManager.shared.log("ReceiverIOS (TCP): New connection from \(connection.endpoint)")
-                self?.handleNewConnection(connection, type: "TCP")
-            }
-
-            listener.start(queue: networkQueue)
-            self.tcpListener = listener
-        } catch {
-            LogManager.shared.log("ReceiverIOS (TCP): Error \(error)")
-        }
-
-        // 2. AWDL/P2P listener — low-latency direct link for Apple devices (Mac sender)
-        //    Uses dynamic port (Apple devices resolve via Bonjour, don't need fixed port)
-        do {
-            let tcpOptions = NWProtocolTCP.Options()
-            tcpOptions.enableKeepalive = true
-            tcpOptions.noDelay = true
-            let p2pParams = NWParameters(tls: nil, tcp: tcpOptions)
-            p2pParams.includePeerToPeer = true
-            p2pParams.serviceClass = .interactiveVideo
-
-            let p2pListener = try NWListener(using: p2pParams) // dynamic port — OK for Apple
-            p2pListener.service = NWListener.Service(name: "\(deviceName) P2P", type: BCConstants.tcpServiceType)
-
-            p2pListener.stateUpdateHandler = { [weak self] state in
-                self?.handleListenerState(state, type: "TCP-P2P")
-            }
-            p2pListener.newConnectionHandler = { [weak self] connection in
-                LogManager.shared.log("ReceiverIOS (TCP-P2P): New AWDL connection from \(connection.endpoint)")
-                self?.handleNewConnection(connection, type: "TCP")
-            }
-
-            p2pListener.start(queue: networkQueue)
-            self.tcpP2PListener = p2pListener
-        } catch {
-            LogManager.shared.log("ReceiverIOS (TCP-P2P): Error \(error)")
-        }
-    }
-    
-    private func startUDP() {
-        do {
-            let parameters = NWParameters.udp
-            parameters.includePeerToPeer = true
-            
-            let listener = try NWListener(using: parameters)
-            let udpDeviceName = UIDevice.current.name
-            listener.service = NWListener.Service(name: udpDeviceName, type: BCConstants.udpServiceType)
-            
-            listener.stateUpdateHandler = { [weak self] state in
-                self?.handleListenerState(state, type: "UDP")
-            }
-            
-            listener.newConnectionHandler = { [weak self] connection in
-                LogManager.shared.log("ReceiverIOS (UDP): New connection from \(connection.endpoint)")
-                self?.handleNewConnection(connection, type: "UDP")
-            }
-            
-            listener.start(queue: networkQueue)
-            self.udpListener = listener
-        } catch {
-            LogManager.shared.log("ReceiverIOS (UDP): Error \(error)")
-        }
-    }
     
     private func handleListenerState(_ state: NWListener.State, type: String) {
         switch state {
@@ -349,18 +292,14 @@ class NetworkListenerIOS {
                 privateListenerRestartWork?.cancel()
                 privateListenerRestartWork = nil
             }
-            let listener: NWListener? = {
-                switch type {
-                case "TCP": return self.tcpListener
-                case "TCP-P2P": return self.tcpP2PListener
-                default: return self.udpListener
-                }
-            }()
+            let listener = self.tcpP2PListener
             if let port = listener?.port {
-                LogManager.shared.log("ReceiverIOS (\(type)): Ready on port \(port)")
+                let strategy = activeListenerUsesDynamicPort ? "dynamic fallback" : "preferred fixed"
+                LogManager.shared.log("ReceiverIOS (\(type)): Ready on port \(port) (\(strategy))")
             } else {
                 LogManager.shared.log("ReceiverIOS (\(type)): Ready")
             }
+            useDynamicPortForNextListener = false
             // Only announce "waiting" while no session is active — the listener
             // also reports ready on restarts during a live session.
             if mainConnection == nil {
@@ -368,35 +307,27 @@ class NetworkListenerIOS {
             }
         case .failed(let error):
             LogManager.shared.log("ReceiverIOS (\(type)): Failed \(error) — restarting...")
+            if !activeListenerUsesDynamicPort,
+               case .posix(let code) = error,
+               code == .EADDRINUSE {
+                useDynamicPortForNextListener = true
+                LogManager.shared.log(
+                    "ReceiverIOS: Preferred port \(Self.preferredPortNumber) is in use; next listener will use a dynamic port"
+                )
+            }
             if mainConnection == nil {
                 notifyState(.waiting, "Restarting listener...")
             }
             // Auto-restart the failed listener
-            switch type {
-            case "TCP":
-                self.tcpListener?.cancel()
-                self.tcpListener = nil
-                networkQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    guard self?.isStarted == true else { return }
-                    self?.startTCP()
-                }
-            case "TCP-P2P":
-                // Private build starts only this listener — it MUST come back after a
-                // failure (Wi-Fi transition, AWDL teardown), or the iPad stays
-                // undiscoverable until the app is relaunched.
-                self.tcpP2PListener?.stateUpdateHandler = nil
-                self.tcpP2PListener?.newConnectionHandler = nil
-                self.tcpP2PListener?.cancel()
-                self.tcpP2PListener = nil
-                schedulePrivateListenerRestart(reason: error.localizedDescription)
-            default:
-                self.udpListener?.cancel()
-                self.udpListener = nil
-                networkQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    guard self?.isStarted == true else { return }
-                    self?.startUDP()
-                }
-            }
+            // This build starts exactly one listener, and it MUST come back after
+            // a failure (Wi-Fi transition, AWDL teardown) or the iPad stays
+            // undiscoverable until the app is relaunched.
+            self.tcpP2PListener?.stateUpdateHandler = nil
+            self.tcpP2PListener?.newConnectionHandler = nil
+            self.tcpP2PListener?.serviceRegistrationUpdateHandler = nil
+            self.tcpP2PListener?.cancel()
+            self.tcpP2PListener = nil
+            schedulePrivateListenerRestart(reason: error.localizedDescription)
         default:
             break
         }
@@ -408,7 +339,7 @@ class NetworkListenerIOS {
     private static let maxPendingHandshakes = 4
     private var pendingConnections: [ObjectIdentifier: NWConnection] = [:]
 
-    private struct AuthenticatedReceiverConnection {
+    private struct AuthenticatedReceiverConnection: Sendable {
         let role: StreamConnectionRole
         let sessionID: UUID
         let sessionKey: Data
@@ -436,6 +367,12 @@ class NetworkListenerIOS {
             connection.cancel()
         }
 
+        connection.viabilityUpdateHandler = { viable in
+            LogManager.shared.log("ReceiverIOS: Connection viability changed to \(viable)")
+        }
+        connection.pathUpdateHandler = { path in
+            LogManager.shared.log("ReceiverIOS: Path changed — \(Self.pathDescription(path))")
+        }
         connection.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
             switch state {
@@ -444,7 +381,7 @@ class NetworkListenerIOS {
                     connection.cancel()
                     return
                 }
-                LogManager.shared.log("ReceiverIOS: \(type) Connection ready")
+                LogManager.shared.log("ReceiverIOS: \(type) connection ready — \(Self.pathDescription(connection.currentPath))")
 
                 self.performPairingHandshake(on: connection) { [weak self] result in
                     guard let self = self else { return }
@@ -456,11 +393,7 @@ class NetworkListenerIOS {
                             return
                         }
 
-                        if type == "UDP" {
-                            self.receiveUDP(on: connection)
-                        } else {
-                            self.receiveTCP(on: connection)
-                        }
+                        self.receiveTCP(on: connection)
                     case .failure(let error):
                         LogManager.shared.log("ReceiverIOS: Pairing failed: \(error.localizedDescription)")
                         if self.mainConnection == nil {
@@ -470,10 +403,11 @@ class NetworkListenerIOS {
                     }
                 }
             case .failed(let error):
-                LogManager.shared.log("ReceiverIOS: Connection failed \(error)")
+                LogManager.shared.log("ReceiverIOS: Connection failed — \(error); \(Self.pathDescription(connection.currentPath))")
                 self.pendingConnections.removeValue(forKey: connectionID)
                 self.removeConnection(connection)
             case .cancelled:
+                LogManager.shared.log("ReceiverIOS: Connection cancelled; \(Self.pathDescription(connection.currentPath))")
                 self.pendingConnections.removeValue(forKey: connectionID)
                 self.removeConnection(connection)
             default:
@@ -481,6 +415,20 @@ class NetworkListenerIOS {
             }
         }
         connection.start(queue: networkQueue)
+    }
+
+    private static func pathDescription(_ path: NWPath?) -> String {
+        guard let path else { return "path unavailable" }
+        var usedTypes: [String] = []
+        if path.usesInterfaceType(.wiredEthernet) { usedTypes.append("wiredEthernet") }
+        if path.usesInterfaceType(.wifi) { usedTypes.append("wifi-family") }
+        if path.usesInterfaceType(.cellular) { usedTypes.append("cellular") }
+        if path.usesInterfaceType(.loopback) { usedTypes.append("loopback") }
+        if usedTypes.isEmpty { usedTypes.append("other") }
+        let available = path.availableInterfaces
+            .map { "\($0.name)[\($0.type)]" }
+            .joined(separator: ", ")
+        return "status=\(path.status), usedTypes=\(usedTypes.joined(separator: "+")), available=[\(available)]"
     }
 
     private func activateAuthenticatedConnection(
@@ -591,7 +539,7 @@ class NetworkListenerIOS {
         }
     }
 
-    private func sendLengthPrefixedData(_ data: Data, on connection: NWConnection, completion: @escaping (Result<Void, Error>) -> Void) {
+    private func sendLengthPrefixedData(_ data: Data, on connection: NWConnection, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
         guard !data.isEmpty else {
             completion(.failure(PairingAuthError.invalidEnvelope))
             return
@@ -611,7 +559,7 @@ class NetworkListenerIOS {
         })
     }
 
-    private func receiveLengthPrefixedData(on connection: NWConnection, completion: @escaping (Result<Data, Error>) -> Void) {
+    private func receiveLengthPrefixedData(on connection: NWConnection, completion: @escaping @Sendable (Result<Data, Error>) -> Void) {
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { content, _, _, error in
             if let error {
                 completion(.failure(error))
@@ -646,7 +594,7 @@ class NetworkListenerIOS {
         }
     }
 
-    private func sendCodable<T: Encodable>(_ value: T, on connection: NWConnection, completion: @escaping (Result<Void, Error>) -> Void) {
+    private func sendCodable<T: Encodable>(_ value: T, on connection: NWConnection, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
         do {
             let data = try JSONEncoder().encode(value)
             sendLengthPrefixedData(data, on: connection, completion: completion)
@@ -655,7 +603,7 @@ class NetworkListenerIOS {
         }
     }
 
-    private func receiveCodable<T: Decodable>(_ type: T.Type, on connection: NWConnection, completion: @escaping (Result<T, Error>) -> Void) {
+    private func receiveCodable<T: Decodable & Sendable>(_ type: T.Type, on connection: NWConnection, completion: @escaping @Sendable (Result<T, Error>) -> Void) {
         receiveLengthPrefixedData(on: connection) { result in
             switch result {
             case .success(let data):
@@ -672,7 +620,7 @@ class NetworkListenerIOS {
 
     private func performPairingHandshake(
         on connection: NWConnection,
-        completion: @escaping (Result<AuthenticatedReceiverConnection, Error>) -> Void
+        completion: @escaping @Sendable (Result<AuthenticatedReceiverConnection, Error>) -> Void
     ) {
         guard let secret = loadPairingSecret() else {
             completion(.failure(PairingAuthError.invalidProof))
@@ -790,7 +738,7 @@ class NetworkListenerIOS {
                     return
                 }
 
-                connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { body, bodyContext, isComplete, error in
+                connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { [weak self] body, bodyContext, isComplete, error in
                     if let error = error {
                         LogManager.shared.log("ReceiverIOS (TCP): Body error \(error)")
                         self?.removeConnection(connection)
@@ -868,79 +816,14 @@ class NetworkListenerIOS {
         }
     }
     
-    private func receiveUDP(on connection: NWConnection) {
-        connection.receiveMessage { [weak self] content, contentContext, isComplete, error in
-            if error != nil { return }
-            if let content = content, !content.isEmpty {
-                 self?.handleUDPPacket(content)
-            }
-            self?.receiveUDP(on: connection)
-        }
-    }
-    
-    private func handleUDPPacket(_ data: Data) {
-        guard data.count > 8 else { return }
-        
-        let header = data.prefix(8)
-        let payload = data.dropFirst(8)
-        
-        let frameID = header.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt32.self).bigEndian }
-        let chunkID = header.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt16.self).bigEndian }
-        let totalChunks = header.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).bigEndian }
-        
-        udpLock.lock()
-        defer { udpLock.unlock() }
-        
-        if lastDecodedFrameId == 0 { lastDecodedFrameId = frameID &- 1 }
-        
-        if udpBuffer[frameID] == nil {
-            udpBuffer[frameID] = (total: Int(totalChunks), chunks: [:], time: Date())
-        }
-        
-        udpBuffer[frameID]?.chunks[chunkID] = payload
-        
-        if let entry = udpBuffer[frameID], entry.chunks.count == entry.total {
-            
-            // Gap Detection
-            let diff = Int(frameID) - Int(lastDecodedFrameId)
-            if diff > 1 && diff < 1000 {
-                 // Throttle to 2.0s
-                 if Date().timeIntervalSince(lastKeyframeRequest) > 2.0 {
-                     LogManager.shared.log("ReceiverIOS: Gap Detected. Requesting IDR.")
-                     sendInputEvent(InputEvent(type: .command, keyCode: 999))
-                     lastKeyframeRequest = Date()
-                 }
-            }
-            
-            lastDecodedFrameId = frameID
-            
-            let sortedChunks = entry.chunks.sorted { $0.key < $1.key }
-            var fullData = Data()
-            for (_, chunkData) in sortedChunks {
-                fullData.append(chunkData)
-            }
-            
-            self.videoDecoder?.decode(data: fullData)
-            udpBuffer.removeValue(forKey: frameID)
-            
-            // Aggressive cleanup to prevent memory buildup on iOS
-            udpPacketsReceived += 1
-            if udpPacketsReceived % 30 == 0 || udpBuffer.count > 10 {
-                 for (key, val) in udpBuffer {
-                    if val.time.timeIntervalSinceNow < -0.5 {
-                        udpBuffer.removeValue(forKey: key)
-                    }
-                }
-            }
-        }
-    }
-    
     private func startHeartbeat() {
         LogManager.shared.log("ReceiverIOS: Starting heartbeat timer (0.5s interval)")
         DispatchQueue.main.async { [weak self] in
             let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-                self?.sendHeartbeat()
-                self?.checkStreamHealth()
+                Task { @MainActor [weak self] in
+                    self?.sendHeartbeat()
+                    self?.checkStreamHealth()
+                }
             }
             // Allow coalescing so a busy main thread doesn't starve heartbeats outright,
             // and keep firing during UI tracking (scrolling/gesture interaction).
@@ -950,6 +833,7 @@ class NetworkListenerIOS {
         }
     }
 
+    @MainActor
     private func sendHeartbeat() {
         // Don't log each beat (2 lines/sec drowns the log) and don't bother
         // building envelopes when no sender is connected; sendInputEvent checks
@@ -970,7 +854,7 @@ class NetworkListenerIOS {
     /// the session and virtual display in a grace period instead of tearing down
     /// after the 15s heartbeat timeout. Sent inside a short background task from
     /// ViewController so it flushes before iPadOS suspends the app.
-    func sendBackgroundHold(completion: (() -> Void)? = nil) {
+    func sendBackgroundHold(completion: (@MainActor @Sendable () -> Void)? = nil) {
         LogManager.shared.log("ReceiverIOS: Sending background hold notice (keyCode 555)")
         sendInputEvent(InputEvent(type: .command, keyCode: 555))
         // sendInputEvent hops to networkQueue; signal completion after the send
@@ -985,6 +869,7 @@ class NetworkListenerIOS {
     /// Evaluate transport, decode, and renderer health independently. A static
     /// screen is healthy when the explicit media heartbeat continues even if
     /// ScreenCaptureKit has no changed frame to send.
+    @MainActor
     private func checkStreamHealth() {
         let appIsActive = UIApplication.shared.applicationState == .active
         networkQueue.async { [weak self] in
@@ -1081,9 +966,10 @@ extension NetworkListenerIOS: VideoDecoderDelegate {
             self?.hasDecodedFrame = true
             self?.lastVideoDecoded = Date()
         }
+        let transferredSample = ReceiverTransfer(sampleBuffer)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if self.videoRenderer?.enqueue(sampleBuffer) == true {
+            if self.videoRenderer?.enqueue(transferredSample.value) == true {
                 self.networkQueue.async { [weak self] in
                     self?.hasRenderedFrame = true
                     self?.lastVideoRendered = Date()

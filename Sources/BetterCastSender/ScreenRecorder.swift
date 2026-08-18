@@ -1,13 +1,13 @@
 import Foundation
-import ScreenCaptureKit
-import CoreMedia
+@preconcurrency import ScreenCaptureKit
+@preconcurrency import CoreMedia
 
 protocol ScreenRecorderDelegate: AnyObject {
     func screenRecorderDidFailToStart(_ recorder: ScreenRecorder, reason: String)
     func screenRecorderDidStopUnexpectedly(_ recorder: ScreenRecorder)
 }
 
-class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
+final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private var stream: SCStream?
     private var videoEncoder: VideoEncoder?
     private var targetDisplayID: CGDirectDisplayID?

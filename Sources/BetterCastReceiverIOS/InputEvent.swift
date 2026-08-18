@@ -1,6 +1,18 @@
 #if canImport(UIKit)
 import Foundation
 
+private final class InputEventIDGenerator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64 = 0
+
+    func next() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        value &+= 1
+        return value
+    }
+}
+
 enum InputEventType: Int, Codable {
     case mouseMove = 0
     case leftMouseDown = 1
@@ -20,9 +32,9 @@ struct InputEvent: Codable {
     let keyCode: UInt16
     let deltaX: Double
     let deltaY: Double
-    let eventId: UInt64 // Unique ID for deduplication of redundant UDP sends
+    let eventId: UInt64
 
-    private static var nextId: UInt64 = 0
+    private static let idGenerator = InputEventIDGenerator()
 
     init(type: InputEventType, x: Double = 0, y: Double = 0, keyCode: UInt16 = 0, deltaX: Double = 0, deltaY: Double = 0) {
         self.type = type
@@ -31,9 +43,7 @@ struct InputEvent: Codable {
         self.keyCode = keyCode
         self.deltaX = deltaX
         self.deltaY = deltaY
-        InputEvent.nextId += 1
-        self.eventId = InputEvent.nextId
+        self.eventId = InputEvent.idGenerator.next()
     }
 }
 #endif
-

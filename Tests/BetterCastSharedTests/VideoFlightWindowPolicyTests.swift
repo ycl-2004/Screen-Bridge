@@ -7,15 +7,14 @@ import XCTest
 final class VideoFlightWindowPolicyTests: XCTestCase {
 
     func testReliableLinksGetHeadroom() {
-        let cases: [(name: String, p2p: Bool, wired: Bool, loopback: Bool)] = [
-            ("USB/Thunderbolt", false, true, false),
-            ("peer-to-peer", true, false, false),
-            ("loopback", false, false, true),
+        let cases: [(name: String, p2p: Bool, wired: Bool)] = [
+            ("USB/Thunderbolt", false, true),
+            ("peer-to-peer", true, false),
         ]
         for c in cases {
             XCTAssertEqual(
                 VideoFlightWindowPolicy.maxFramesInFlight(
-                    isP2P: c.p2p, isWiredCable: c.wired, isLoopback: c.loopback
+                    isP2P: c.p2p, isWiredCable: c.wired
                 ),
                 VideoFlightWindowPolicy.reliableLinkWindow,
                 "\(c.name) must not be gated at a single frame"
@@ -26,7 +25,7 @@ final class VideoFlightWindowPolicyTests: XCTestCase {
     func testSharedLinksStayConservative() {
         XCTAssertEqual(
             VideoFlightWindowPolicy.maxFramesInFlight(
-                isP2P: false, isWiredCable: false, isLoopback: false
+                isP2P: false, isWiredCable: false
             ),
             VideoFlightWindowPolicy.sharedLinkWindow
         )

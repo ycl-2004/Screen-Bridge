@@ -84,7 +84,9 @@ Primary file:
 Important responsibilities inside `BetterCastSenderApp.swift`:
 
 - SwiftUI app shell, onboarding, sidebar, settings, logs, and device detail panels.
-- `NetworkClient` handles Bonjour browsing, manual connections, pairing, connection state, stream settings, quality selection, display placement, and pipeline lifecycle.
+- `NetworkClient` handles Bonjour browsing, evidence-backed route selection,
+  pairing, connection state, stream settings, quality selection, display
+  placement, and pipeline lifecycle.
 - `performPairingHandshake(...)` sends `SenderHello`, verifies `ReceiverHello`, sends `SenderProof`, and derives the session key.
 - `activateAuthenticatedConnection(...)` only creates the pipeline after pairing succeeds.
 - `startPipeline(for:)` creates the virtual display, chooses capture size, applies adaptive quality, starts video/audio encoders, and starts `ScreenRecorder`.
@@ -95,14 +97,17 @@ Other sender files:
 - `ScreenRecorder.swift` captures the selected display through ScreenCaptureKit.
 - `VideoEncoder.swift` encodes video.
 - `AudioEncoder.swift` and `ProcessAudioTapCapture.swift` handle optional Chrome audio routing.
-- `InputHandler.swift` exists for older/input-capable paths, but the current Mac-to-iPad product path is display-only.
-- `ReceiverNetworkListener.swift`, `ReceiverMode.swift`, `ReceiverVideoDecoder.swift`, and `ReceiverVideoRenderer.swift` support macOS acting as a receiver. Treat this as secondary unless the task is explicitly about receiver mode.
+- `InputHandler.swift` only stores each connection's virtual-display bounds. The name is historical; it handles no input, and the Mac-to-iPad path is display-only.
 
 Build local Mac app/DMG:
 
 ```bash
-env SIGN_IDENTITY=- ./make_app.sh
+SIGN_IDENTITY="Apple Development: <your identity>" ./make_app.sh
 ```
+
+An Apple-issued identity is required. macOS tracks Screen Recording and Local
+Network permission by signing identity, so an ad-hoc build loses both every time
+it is rebuilt — it is available only via an explicit `ALLOW_AD_HOC=1` opt-in.
 
 ### iPad Receiver
 
@@ -179,7 +184,9 @@ Read `Sources/BetterCastReceiverDesktop/BUILD.md` before working here. Treat thi
 
 - `make_app.sh` builds the macOS app bundle and DMG.
 - `package_ios_ipa.sh` packages an already-built iOS receiver binary into an IPA-style payload.
-- `BetterCastSender-Info.plist` and `BetterCastSender-Release.entitlements` define macOS bundle metadata and entitlements.
+- `BetterCastSender-Info.plist` defines macOS bundle metadata. The app currently
+  requests no restricted entitlements, so `make_app.sh` signs without embedding
+  an empty entitlement blob.
 - `Sources/BetterCastReceiverIOS/Info.plist` defines iOS receiver metadata.
 - `assets/branding/BetterCastIcon.icns` is the macOS app icon asset.
 - `docs/release-notes/v8.md` contains release notes for the current v8 work.
@@ -244,7 +251,7 @@ swift build
 ```
 
 ```bash
-env SIGN_IDENTITY=- ./make_app.sh
+SIGN_IDENTITY="Apple Development: <your identity>" ./make_app.sh
 ```
 
 ```bash

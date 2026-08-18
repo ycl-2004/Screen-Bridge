@@ -11,7 +11,7 @@ decoder or renderer. Conversely, ScreenCaptureKit may emit no new complete frame
 while a desktop is visually static, so using frame arrival alone would report a
 healthy static screen as disconnected.
 
-The sender also let P2P, wired, and loopback video writes accumulate without
+The sender also let P2P and wired video writes accumulate without
 completion backpressure. Those routes are usually fast, but a transient receiver
 stall can still grow Network.framework's queue and turn a short interruption
 into seconds of latency.
@@ -27,8 +27,9 @@ into seconds of latency.
   desktop healthy.
 - Screen capture accepts only valid sample buffers whose ScreenCaptureKit frame
   status is `complete`.
-- Every TCP route permits one in-flight video packet and retains at most one
-  newest recovery keyframe. P-frames are dropped under pressure.
+- Shared infrastructure paths permit two in-flight video packets. Verified
+  AWDL and cable paths permit four. Every path retains at most one newest
+  recovery keyframe, and P-frames are dropped once its bounded window is full.
 - Auxiliary audio permits one in-flight AAC packet and retains only the newest
   pending packet. Media heartbeats also permit only one in-flight write, so no
   media class can grow an unbounded Network.framework queue.

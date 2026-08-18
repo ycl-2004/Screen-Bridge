@@ -1,13 +1,14 @@
 import Foundation
-import VideoToolbox
-import CoreMedia
+@preconcurrency import VideoToolbox
+@preconcurrency import CoreMedia
+@preconcurrency import CoreVideo
 
 /// Runs the frame owner's cleanup exactly once after VideoToolbox finishes
 /// with an asynchronously submitted image buffer.
-private final class VideoFrameCompletionToken {
-    private let completion: () -> Void
+private final class VideoFrameCompletionToken: @unchecked Sendable {
+    private let completion: @Sendable () -> Void
 
-    init(completion: @escaping () -> Void) {
+    init(completion: @escaping @Sendable () -> Void) {
         self.completion = completion
     }
 
@@ -16,11 +17,18 @@ private final class VideoFrameCompletionToken {
     }
 }
 
+/// CoreMedia/CoreVideo reference types are retainable across dispatch queues
+/// but do not declare Sendable in the current SDK. This box makes that single
+/// ownership transfer explicit at the queue boundary.
+private struct VideoTransfer<Value>: @unchecked Sendable {
+    let value: Value
+}
+
 protocol VideoEncoderDelegate: AnyObject {
     func videoEncoder(_ encoder: VideoEncoder, didEncode data: Data, for connectionId: UUID, isKeyframe: Bool)
 }
 
-class VideoEncoder {
+final class VideoEncoder: @unchecked Sendable {
     weak var delegate: VideoEncoderDelegate?
     let connectionId: UUID
     private var compressionSession: VTCompressionSession?
@@ -156,7 +164,9 @@ class VideoEncoder {
     }
 
     func encode(sampleBuffer: CMSampleBuffer) {
+        let transfer = VideoTransfer(value: sampleBuffer)
         encoderQueue.async { [weak self] in
+            let sampleBuffer = transfer.value
             guard let self,
                   !self.isInvalidated,
                   let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
@@ -180,8 +190,9 @@ class VideoEncoder {
         pixelBuffer: CVPixelBuffer,
         presentationTimestamp: CMTime,
         duration: CMTime,
-        onCompleted: @escaping () -> Void
+        onCompleted: @escaping @Sendable () -> Void
     ) {
+        let transfer = VideoTransfer(value: pixelBuffer)
         encoderQueue.async { [weak self] in
             guard let self else {
                 onCompleted()
@@ -189,7 +200,7 @@ class VideoEncoder {
             }
 
             self.encode(
-                imageBuffer: pixelBuffer,
+                imageBuffer: transfer.value,
                 presentationTimestamp: presentationTimestamp,
                 duration: duration,
                 completion: onCompleted
@@ -201,7 +212,7 @@ class VideoEncoder {
         imageBuffer: CVImageBuffer,
         presentationTimestamp: CMTime,
         duration: CMTime,
-        completion: (() -> Void)?
+        completion: (@Sendable () -> Void)?
     ) {
         guard !isInvalidated, let session = compressionSession else {
             completion?()
@@ -279,8 +290,9 @@ class VideoEncoder {
     
     private func compressionCallback(status: OSStatus, flags: VTEncodeInfoFlags, sampleBuffer: CMSampleBuffer?) {
         guard let sampleBuffer, status == noErr else { return }
+        let transfer = VideoTransfer(value: sampleBuffer)
         callbackQueue.async { [weak self] in
-            self?.processEncodedSampleBuffer(sampleBuffer)
+            self?.processEncodedSampleBuffer(transfer.value)
         }
     }
 

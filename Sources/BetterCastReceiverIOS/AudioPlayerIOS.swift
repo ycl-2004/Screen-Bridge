@@ -5,7 +5,7 @@ import AudioToolbox
 
 /// Decodes raw AAC-LC frames and plays them via AVAudioEngine.
 /// Expects raw AAC packets (no ADTS headers) as produced by the Mac audio encoder.
-class AudioPlayerIOS {
+final class AudioPlayerIOS: @unchecked Sendable {
 
     private var audioEngine: AVAudioEngine?
     private var playerNode: AVAudioPlayerNode?
@@ -266,8 +266,9 @@ class AudioPlayerIOS {
             pcmBuffer.frameLength = outputDataPacketSize
             pendingBuffers += 1
             playerNode?.scheduleBuffer(pcmBuffer) { [weak self] in
-                self?.queue.async {
-                    self?.pendingBuffers = max((self?.pendingBuffers ?? 1) - 1, 0)
+                self?.queue.async { [weak self] in
+                    guard let self else { return }
+                    self.pendingBuffers = max(self.pendingBuffers - 1, 0)
                 }
             }
             startPlaybackIfReady()

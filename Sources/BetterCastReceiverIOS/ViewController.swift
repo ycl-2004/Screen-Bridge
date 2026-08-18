@@ -883,6 +883,15 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         resetPairingButton.addTarget(self, action: #selector(confirmClearPairingCode), for: .touchUpInside)
         resetPairingButton.translatesAutoresizingMaskIntoConstraints = false
 
+        let exportLogsButton = UIButton(type: .system)
+        exportLogsButton.setTitle("Export Diagnostics", for: .normal)
+        exportLogsButton.setTitleColor(.white, for: .normal)
+        exportLogsButton.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.5)
+        exportLogsButton.layer.cornerRadius = 10
+        exportLogsButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+        exportLogsButton.addTarget(self, action: #selector(exportDiagnostics), for: .touchUpInside)
+        exportLogsButton.translatesAutoresizingMaskIntoConstraints = false
+
         // Close button
         let closeButton = UIButton(type: .system)
         closeButton.setTitle("Close", for: .normal)
@@ -891,7 +900,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         closeButton.addTarget(self, action: #selector(hideSettings), for: .touchUpInside)
         closeButton.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = UIStackView(arrangedSubviews: [displayModeButton, resetPairingButton, hideButtonButton, closeButton])
+        let stack = UIStackView(arrangedSubviews: [displayModeButton, exportLogsButton, resetPairingButton, hideButtonButton, closeButton])
         stack.axis = .vertical
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -908,6 +917,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
             stack.trailingAnchor.constraint(equalTo: settingsOverlayBlur.contentView.trailingAnchor, constant: -20),
 
             displayModeButton.heightAnchor.constraint(equalToConstant: 44),
+            exportLogsButton.heightAnchor.constraint(equalToConstant: 44),
             resetPairingButton.heightAnchor.constraint(equalToConstant: 44),
             hideButtonButton.heightAnchor.constraint(equalToConstant: 44),
             // Close had only its intrinsic height (~20pt), below the touch target minimum.
@@ -968,6 +978,20 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         } completion: { _ in
             self.settingsOverlay.isHidden = true
         }
+    }
+
+    @objc private func exportDiagnostics() {
+        guard let logURL = LogManager.shared.exportURL() else {
+            presentAlert(title: "No Diagnostics Yet", message: "Use ScreenBridge once, then try exporting again.")
+            return
+        }
+
+        let activity = UIActivityViewController(activityItems: [logURL], applicationActivities: nil)
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = settingsButton
+            popover.sourceRect = settingsButton.bounds
+        }
+        present(activity, animated: !UIAccessibility.isReduceMotionEnabled)
     }
 
     @objc private func toggleDisplayMode() {

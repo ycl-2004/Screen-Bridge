@@ -64,8 +64,10 @@ cp "$BUILD_DIR/BetterCastSender" "$APP_NAME/Contents/MacOS/ScreenBridge"
 cp "BetterCastSender-Info.plist" "$APP_NAME/Contents/Info.plist"
 cp "assets/branding/BetterCastIcon.icns" "$APP_NAME/Contents/Resources/AppIcon.icns"
 
-# Code sign with entitlements
-codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" --entitlements "BetterCastSender-Release.entitlements" "$APP_NAME"
+# This app currently requests no restricted entitlements. Passing an empty
+# entitlement plist produces an invalid entitlement blob on some macOS builds,
+# which can make TCC and signature diagnostics disagree about the app identity.
+codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_NAME"
 codesign --verify --deep --strict "$APP_NAME"
 
 # ============================================

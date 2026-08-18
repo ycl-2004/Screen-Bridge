@@ -1,27 +1,13 @@
 import Foundation
-import BetterCastShared
 
-/// Shared constants for the ScreenBridge iOS receiver app.
+/// Constants for the ScreenBridge iOS receiver app.
+///
+/// Deliberately small. The port, service type, and AAC format values that used
+/// to live here were never read: the listener takes its service type straight
+/// from `PrivateBetterCastConstants`, and `AudioPlayerIOS` carries its own
+/// format values. Duplicated constants that nothing reads drift away from the
+/// real ones and mislead the next reader.
 enum BCConstants {
-    /// Standard TCP port for ScreenBridge video/audio stream.
-    static let tcpPort: UInt16 = 51820
-
-    /// Standard UDP port for chunked frame delivery.
-    static let udpPort: UInt16 = 51821
-
-    /// Bonjour service types advertised on the local network.
-    static let tcpServiceType = PrivateBetterCastConstants.serviceType
-    static let udpServiceType = PrivateBetterCastConstants.serviceType
-
-    /// AAC-LC frame size in samples.
-    static let aacFrameSize: UInt32 = 1024
-
-    /// Default audio sample rate (Hz) for AAC decode.
-    static let audioSampleRate: Double = 48_000
-
-    /// Audio channel count for stereo output.
-    static let audioChannels: UInt32 = 2
-
     /// Preferred audio IO buffer duration (seconds). Lower = lower latency.
     static let audioIOBufferDuration: TimeInterval = 0.005
 }

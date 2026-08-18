@@ -4,7 +4,7 @@ import VirtualDisplayLib
 
 /// Swift wrapper for the Objective-C VirtualDisplay functionality
 /// Uses private CoreGraphics APIs to create virtual displays
-class VirtualDisplayManager {
+final class VirtualDisplayManager: @unchecked Sendable {
     enum DisplayPlacement: String, CaseIterable, Identifiable {
         case right
         case left
