@@ -5,21 +5,21 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>ScreenBridge</string>
+    <string>Screen Bridge</string>
     <key>CFBundleIdentifier</key>
     <string>com.yichen.yccast.receiver.ios</string>
     <key>CFBundleDisplayName</key>
-    <string>ScreenBridge</string>
+    <string>Screen Bridge</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>ScreenBridge</string>
+    <string>Screen Bridge</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>8.0</string>
+    <string>1.0</string>
     <key>CFBundleVersion</key>
-    <string>8</string>
+    <string>1</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>MinimumOSVersion</key>
@@ -44,7 +44,7 @@
         </dict>
     </dict>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>ScreenBridge uses the local network to connect to your Mac.</string>
+    <string>Screen Bridge uses the local network to connect to your Mac.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_yc-cast._tcp</string>

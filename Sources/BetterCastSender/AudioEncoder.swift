@@ -15,6 +15,7 @@ final class AudioEncoder: @unchecked Sendable {
     private var inputFormat: AudioStreamBasicDescription?
     private var outputFormat: AudioStreamBasicDescription?
     private var frameCount = 0
+    private var hasLoggedUnsupportedFormat = false
 
     // Interleaved PCM ring buffer — accumulates until we have 1024+ frames for AAC
     private var pcmAccumulator = Data()
@@ -29,11 +30,6 @@ final class AudioEncoder: @unchecked Sendable {
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
         let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee
         guard let srcFormat = asbd else { return }
-
-        // Initialize converter on first audio frame
-        if converter == nil {
-            setupConverter(sourceFormat: srcFormat)
-        }
 
         // Get the required AudioBufferList size (may need multiple buffers for non-interleaved)
         var ablSize: Int = 0
@@ -72,6 +68,21 @@ final class AudioEncoder: @unchecked Sendable {
     }
 
     func encode(audioBufferList: UnsafePointer<AudioBufferList>, sourceFormat srcFormat: AudioStreamBasicDescription) {
+        let isFloatPCM = srcFormat.mFormatID == kAudioFormatLinearPCM
+            && (srcFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+            && srcFormat.mBitsPerChannel == 32
+        guard isFloatPCM, (1...2).contains(srcFormat.mChannelsPerFrame) else {
+            if !hasLoggedUnsupportedFormat {
+                hasLoggedUnsupportedFormat = true
+                LogManager.shared.log(
+                    "AudioEncoder: Unsupported tap PCM format — rate=\(Int(srcFormat.mSampleRate))Hz, "
+                        + "channels=\(srcFormat.mChannelsPerFrame), bits=\(srcFormat.mBitsPerChannel), "
+                        + "formatID=\(srcFormat.mFormatID), flags=0x\(String(srcFormat.mFormatFlags, radix: 16))"
+                )
+            }
+            return
+        }
+
         // Initialize converter on first audio frame
         if converter == nil {
             setupConverter(sourceFormat: srcFormat)
@@ -79,7 +90,7 @@ final class AudioEncoder: @unchecked Sendable {
 
         guard let converter = converter else { return }
 
-        let channels = min(Int(srcFormat.mChannelsPerFrame), 2)
+        let channels = Int(srcFormat.mChannelsPerFrame)
         let isNonInterleaved = (srcFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
         let bytesPerSample = Int(srcFormat.mBitsPerChannel / 8)
         guard channels > 0, bytesPerSample > 0 else { return }
@@ -108,13 +119,27 @@ final class AudioEncoder: @unchecked Sendable {
             }
 
             pcmAccumulator.append(interleaved)
-        } else {
-            // Interleaved or mono — use first buffer directly
+        } else if channels == 1 {
+            // The wire format is always stereo. Duplicate mono rather than
+            // silently creating a mono AAC packet the receiver would decode as 2ch.
             guard abl.count > 0 else { return }
             let buf = abl[0]
-            if let data = buf.mData {
-                pcmAccumulator.append(Data(bytes: data, count: Int(buf.mDataByteSize)))
+            guard let data = buf.mData else { return }
+            let frames = Int(buf.mDataByteSize) / bytesPerSample
+            var stereo = Data(count: frames * 2 * bytesPerSample)
+            stereo.withUnsafeMutableBytes { output in
+                let source = data.assumingMemoryBound(to: Float32.self)
+                let destination = output.baseAddress!.assumingMemoryBound(to: Float32.self)
+                for frame in 0..<frames {
+                    destination[frame * 2] = source[frame]
+                    destination[frame * 2 + 1] = source[frame]
+                }
             }
+            pcmAccumulator.append(stereo)
+        } else {
+            // Interleaved stereo can be copied directly.
+            guard abl.count > 0, let data = abl[0].mData else { return }
+            pcmAccumulator.append(Data(bytes: data, count: Int(abl[0].mDataByteSize)))
         }
 
         // Produce AAC packets while we have enough PCM frames buffered
@@ -134,7 +159,7 @@ final class AudioEncoder: @unchecked Sendable {
             defer { outputBuffer.deallocate() }
 
             let outBuffer = AudioBuffer(
-                mNumberChannels: UInt32(channels),
+                mNumberChannels: interleavedChannels,
                 mDataByteSize: outputBufferSize,
                 mData: UnsafeMutableRawPointer(outputBuffer)
             )
@@ -209,21 +234,20 @@ final class AudioEncoder: @unchecked Sendable {
     }
 
     private func setupConverter(sourceFormat: AudioStreamBasicDescription) {
-        let channels = min(sourceFormat.mChannelsPerFrame, 2)
         let bytesPerSample = sourceFormat.mBitsPerChannel / 8
 
-        interleavedChannels = channels
-        bytesPerInterleavedFrame = Int(bytesPerSample * channels)
+        interleavedChannels = 2
+        bytesPerInterleavedFrame = Int(bytesPerSample * interleavedChannels)
 
         // Input: interleaved float32 (we interleave non-interleaved data ourselves)
         var src = AudioStreamBasicDescription(
             mSampleRate: sourceFormat.mSampleRate,
             mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: bytesPerSample * channels,
+            mBytesPerPacket: bytesPerSample * interleavedChannels,
             mFramesPerPacket: 1,
-            mBytesPerFrame: bytesPerSample * channels,
-            mChannelsPerFrame: channels,
+            mBytesPerFrame: bytesPerSample * interleavedChannels,
+            mChannelsPerFrame: interleavedChannels,
             mBitsPerChannel: sourceFormat.mBitsPerChannel,
             mReserved: 0
         )
@@ -235,7 +259,7 @@ final class AudioEncoder: @unchecked Sendable {
             mBytesPerPacket: 0,
             mFramesPerPacket: BCConstants.aacFrameSize,
             mBytesPerFrame: 0,
-            mChannelsPerFrame: channels,
+            mChannelsPerFrame: interleavedChannels,
             mBitsPerChannel: 0,
             mReserved: 0
         )
@@ -254,7 +278,12 @@ final class AudioEncoder: @unchecked Sendable {
         outputFormat = dst
 
         let isNonInterleaved = (sourceFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
-        LogManager.shared.log("AudioEncoder: Initialized (\(Int(sourceFormat.mSampleRate))Hz, \(channels)ch, nonInterleaved=\(isNonInterleaved) → AAC \(Int(BCConstants.audioSampleRate))Hz 128kbps)")
+        LogManager.shared.log(
+            "AudioEncoder: Tap format rate=\(Int(sourceFormat.mSampleRate))Hz, channels=\(sourceFormat.mChannelsPerFrame), "
+                + "bits=\(sourceFormat.mBitsPerChannel), bytesPerFrame=\(sourceFormat.mBytesPerFrame), "
+                + "nonInterleaved=\(isNonInterleaved), flags=0x\(String(sourceFormat.mFormatFlags, radix: 16)); "
+                + "output=AAC-LC \(Int(BCConstants.audioSampleRate))Hz stereo \(BCConstants.aacBitrate / 1_000)kbps"
+        )
     }
 
     deinit {

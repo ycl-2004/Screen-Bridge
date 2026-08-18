@@ -1,7 +1,7 @@
 import Foundation
 import BetterCastShared
 
-/// Shared constants for the ScreenBridge sender app.
+/// Shared constants for the Screen Bridge sender app.
 /// Centralizes magic numbers, ports, paths, and dimensions that were previously
 /// duplicated across multiple files.
 enum BCConstants {
@@ -25,10 +25,6 @@ enum BCConstants {
 
     /// AAC bitrate in bits per second.
     static let aacBitrate: UInt32 = 128_000
-
-    // MARK: - System Tools
-    /// macOS TCC reset utility — used to reset Screen Recording permissions.
-    static let tccutilPath = "/usr/bin/tccutil"
 
     // MARK: - Display Defaults
     /// Default logical long edge for receiver-matched virtual displays.

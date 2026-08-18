@@ -32,10 +32,9 @@ struct BetterCastSenderApp: App {
         Settings {
             DetailPanelView(
                 client: networkClient,
-                selection: .constant(.settings),
-                hasCompletedOnboarding: $hasCompletedOnboarding
+                selection: .constant(.settings)
             )
-            .frame(minWidth: 620, idealWidth: 660, minHeight: 520, idealHeight: 640)
+            .frame(minWidth: 620, idealWidth: 660, minHeight: 500, idealHeight: 600)
         }
     }
 
@@ -56,7 +55,7 @@ struct BetterCastSenderApp: App {
             SidebarView(client: networkClient, selection: $sidebarSelection)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 350)
         } detail: {
-            DetailPanelView(client: networkClient, selection: $sidebarSelection, hasCompletedOnboarding: $hasCompletedOnboarding)
+            DetailPanelView(client: networkClient, selection: $sidebarSelection)
         }
         .frame(minWidth: 750, minHeight: 540)
         .overlay {
@@ -150,8 +149,8 @@ struct GuidedTourOverlay: View {
 
     private let steps: [TourStep] = [
         TourStep(
-            title: "Welcome to ScreenBridge",
-            description: "Let's take a quick tour of the app. ScreenBridge turns any device into a wireless extended display for your Mac.",
+            title: "Welcome to Screen Bridge",
+            description: "Let's take a quick tour of the app. Screen Bridge turns any device into a wireless extended display for your Mac.",
             icon: "hand.wave.fill",
             sidebarTarget: nil,
             anchorKey: nil
@@ -387,7 +386,7 @@ struct OnboardingView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 18))
                     .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
 
-                Text("Welcome to ScreenBridge")
+                Text("Welcome to Screen Bridge")
                     .font(.system(size: 26, weight: .bold))
 
                 Text("Screen capture plus local Mac control")
@@ -490,7 +489,7 @@ struct OnboardingView: View {
             icon: "record.circle",
             iconColor: .red,
             title: "Screen Recording",
-            description: "ScreenBridge needs Screen Recording permission to capture your display and stream it to receivers.",
+            description: "Screen Bridge needs Screen Recording permission to capture your display and stream it to receivers.",
             isGranted: screenRecordingGranted,
             actionTitle: "Open Screen Recording Settings",
             action: {
@@ -763,7 +762,7 @@ struct SidebarView: View {
                     .tourAnchor("sidebar_logs")
             }
         }
-        .navigationTitle("ScreenBridge")
+        .navigationTitle("Screen Bridge")
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 6) {
@@ -792,7 +791,7 @@ struct SidebarView: View {
                         .font(.system(size: 11))
                 }
                 .buttonStyle(.borderless)
-                .help("Quit ScreenBridge")
+                .help("Quit Screen Bridge")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -943,11 +942,9 @@ struct SidebarDeviceRow: View {
 struct DetailPanelView: View {
     @ObservedObject var client: NetworkClient
     @Binding var selection: BetterCastSenderApp.SidebarSelection?
-    @Binding var hasCompletedOnboarding: Bool
-    @AppStorage("hasCompletedTour") private var hasCompletedTour = false
     @State private var pairingCodeInput = ""
     @State private var pairingAlert: PairingAlert?
-    @State private var pendingDestructiveAction: DestructiveAction?
+    @State private var isConfirmingClearPairing = false
 
     /// Feedback for a pairing-code save. Previously a failed save changed nothing
     /// on screen, so it was indistinguishable from success.
@@ -955,47 +952,6 @@ struct DetailPanelView: View {
         let id = UUID()
         let title: String
         let message: String
-    }
-
-    /// Actions that cannot be undone, or that end the current session.
-    private enum DestructiveAction: String, Identifiable {
-        case clearPairing
-        case resetPermissions
-        case restart
-        case setupWizard
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .clearPairing: return "Clear the pairing code?"
-            case .resetPermissions: return "Reset Screen Recording permission?"
-            case .restart: return "Restart ScreenBridge?"
-            case .setupWizard: return "Run the setup wizard again?"
-            }
-        }
-
-        var message: String {
-            switch self {
-            case .clearPairing:
-                return "Any connected iPad is disconnected immediately, and you'll need to enter the same code on both devices again."
-            case .resetPermissions:
-                return "macOS revokes Screen Recording for ScreenBridge and the app restarts to ask for it again. Streaming stops."
-            case .restart:
-                return "Streaming stops and any connected iPad is disconnected."
-            case .setupWizard:
-                return "You'll go back to the first-run screens. Your pairing code and devices are kept."
-            }
-        }
-
-        var confirmTitle: String {
-            switch self {
-            case .clearPairing: return "Clear Pairing"
-            case .resetPermissions: return "Reset Permission"
-            case .restart: return "Restart"
-            case .setupWizard: return "Run Wizard"
-            }
-        }
     }
 
     var body: some View {
@@ -1080,7 +1036,7 @@ struct DetailPanelView: View {
                         Text("Extended Display").tag(true)
                         Text("Mirror Built-in").tag(false)
                     }
-                    InfoTip(text: "Extended creates a separate ScreenBridge display. Mirror sends the Mac's built-in screen instead.")
+                    InfoTip(text: "Extended creates a separate display. Mirror streams your Mac's built-in display.")
                 }
 
                 HStack {
@@ -1090,7 +1046,7 @@ struct DetailPanelView: View {
                         }
                     }
                     .disabled(!client.useVirtualDisplay)
-                    InfoTip(text: "Best Fit is the default iPad mode: 1344 x 934 logical size with HiDPI backing and native capture.")
+                    InfoTip(text: "Best Fit matches the iPad at 1344 × 934 HiDPI.")
                 }
 
                 HStack {
@@ -1100,25 +1056,25 @@ struct DetailPanelView: View {
                         }
                     }
                     .disabled(!client.useVirtualDisplay)
-                    InfoTip(text: "Applies to the next extended display connection. Right is the default.")
+                    InfoTip(text: "Used the next time an extended display connects. Default: Right.")
                 }
 
                 HStack {
                     Toggle("Retina (HiDPI)", isOn: $client.isRetina)
                         .disabled(!client.useVirtualDisplay || client.selectedResolution == VirtualDisplayManager.receiverBestFitResolution)
-                    InfoTip(text: "Adds a Retina-style backing store for sharper text. Best Fit already uses HiDPI.")
+                    InfoTip(text: "Uses HiDPI for sharper text. Best Fit already includes it.")
                 }
 
                 HStack {
                     Slider(value: $client.displayBrightness, in: 0...1, step: 0.05) {
                         Text("Brightness")
                     }
-                    InfoTip(text: "Adjusts the Mac display brightness when the hardware exposes brightness control.")
+                    InfoTip(text: "Adjusts hardware brightness when the display supports it.")
                 }
 
                 HStack {
                     Toggle("Chrome Audio to iPad", isOn: $client.audioStreamingEnabled)
-                    InfoTip(text: "Sends Chrome audio to the receiver and mutes Chrome on this Mac when supported.")
+                    InfoTip(text: "Streams Chrome audio to the iPad and mutes it on this Mac.")
                 }
 
                 Button("Arrange Displays") {
@@ -1134,7 +1090,7 @@ struct DetailPanelView: View {
                         Text(client.hasPairingSecret ? "Paired" : "Not Paired")
                             .foregroundStyle(client.hasPairingSecret ? .green : .orange)
                     }
-                    InfoTip(text: "Use the same pairing code on the Mac and iPad. The code is saved locally and never logged.")
+                    InfoTip(text: "Use the same code on both devices. It stays local and is never logged.")
                 }
 
                 SecureField("Pairing code", text: $pairingCodeInput)
@@ -1157,7 +1113,7 @@ struct DetailPanelView: View {
                         case .storageFailed:
                             pairingAlert = PairingAlert(
                                 title: "Couldn't Save Pairing Code",
-                                message: "The keychain refused the write. Try again, and restart ScreenBridge if it keeps failing."
+                                message: "The keychain refused the write. Try again, and restart Screen Bridge if it keeps failing."
                             )
                         }
                     }
@@ -1177,21 +1133,21 @@ struct DetailPanelView: View {
                         case .tooWeak, .storageFailed:
                             pairingAlert = PairingAlert(
                                 title: "Couldn't Save Pairing Code",
-                                message: "The keychain refused the write. Try again, and restart ScreenBridge if it keeps failing."
+                                message: "The keychain refused the write. Try again, and restart Screen Bridge if it keeps failing."
                             )
                         }
                     }
                     .help("Create a strong random code and save it on this Mac")
 
                     Button("Clear Pairing…") {
-                        pendingDestructiveAction = .clearPairing
+                        isConfirmingClearPairing = true
                     }
                     .disabled(!client.hasPairingSecret)
                 }
 
                 HStack {
                     Toggle("Auto-Connect", isOn: $client.autoConnect)
-                    InfoTip(text: "Connects to the paired receiver automatically when it appears on the local network.")
+                    InfoTip(text: "Connects automatically when the paired iPad appears.")
                 }
 
                 HStack {
@@ -1200,7 +1156,7 @@ struct DetailPanelView: View {
                             Text(mode.label).tag(mode)
                         }
                     }
-                    InfoTip(text: "Auto lets the system choose. Require Cable, AWDL, and Wi-Fi require Bonjour evidence for that exact interface and never fall back to another route.")
+                    InfoTip(text: "Auto chooses the route. A required route never falls back to another connection.")
                 }
 
                 HStack {
@@ -1208,7 +1164,7 @@ struct DetailPanelView: View {
                         Text("Private TCP only")
                             .foregroundStyle(.secondary)
                     }
-                    InfoTip(text: "Video, heartbeat, keyframe requests, and screen-size updates share one authenticated TCP stream. Turning on Chrome Audio opens a second authenticated stream alongside it. The iPad sends no pointer or keyboard input.")
+                    InfoTip(text: "Video and control use one private TCP stream. Chrome audio uses a second authenticated stream.")
                 }
 
                 HStack {
@@ -1217,7 +1173,7 @@ struct DetailPanelView: View {
                             Text(quality.name).tag(quality)
                         }
                     }
-                    InfoTip(text: "Raises video bitrate to reduce compression. It cannot restore detail lost by choosing a low display resolution.")
+                    InfoTip(text: "Raises bitrate to reduce compression. Resolution still controls detail.")
                 }
 
                 if client.isConnected {
@@ -1229,61 +1185,39 @@ struct DetailPanelView: View {
                 }
             }
 
-            Section("Controls") {
-                VStack(spacing: 8) {
-                    HStack(spacing: 10) {
-                        Button("Apply Settings") {
-                            if client.isConnected {
-                                client.updateStreamResolution()
-                            }
-                        }
-                        .disabled(!client.isConnected)
-
-                        Button("Screen Recording Settings…") {
-                            client.openPrivacySettings()
-                        }
-
-                        Button("Local Network Settings…") {
-                            client.openLocalNetworkSettings()
-                        }
-
-                        Button("Reset Permissions…") {
-                            pendingDestructiveAction = .resetPermissions
-                        }
-
-                        Button("Restart…") {
-                            pendingDestructiveAction = .restart
-                        }
+            Section {
+                LabeledContent {
+                    Button("Open Settings…") {
+                        client.openPrivacySettings()
                     }
+                } label: {
+                    Label("Screen Recording", systemImage: "rectangle.dashed.badge.record")
+                }
 
-                    HStack(spacing: 10) {
-                        Button("Setup Wizard…") {
-                            pendingDestructiveAction = .setupWizard
-                        }
-
-                        Button("Replay Tour") {
-                            hasCompletedTour = false
-                            selection = .devices
-                        }
+                LabeledContent {
+                    Button("Open Settings…") {
+                        client.openLocalNetworkSettings()
                     }
+                } label: {
+                    Label("Local Network", systemImage: "network")
+                }
 
-                    if client.localNetworkNeedsAttention {
-                        HStack {
-                            Label(
-                                "Device discovery is blocked. Allow ScreenBridge in Privacy & Security > Local Network.",
-                                systemImage: "network.slash"
-                            )
-                            .font(.caption)
+                if client.localNetworkNeedsAttention {
+                    HStack {
+                        Label("Device discovery is blocked.", systemImage: "network.slash")
                             .foregroundStyle(.orange)
 
-                            Spacer()
+                        Spacer()
 
-                            Button("Retry Discovery") {
-                                client.startBrowsing()
-                            }
+                        Button("Retry Discovery") {
+                            client.startBrowsing()
                         }
                     }
                 }
+            } header: {
+                Text("Permissions")
+            } footer: {
+                Text("Screen Recording captures the display. Local Network finds your iPad.")
             }
 
             if !client.connectedDisplays.isEmpty {
@@ -1332,39 +1266,29 @@ struct DetailPanelView: View {
                     }
                 }
             }
-            // About & Changelog
             Section("About") {
-                LabeledContent("Build") {
-                    Text("ScreenBridge \(AppVersion.current)")
+                LabeledContent("Release") {
+                    Text("Screen Bridge \(AppVersion.current)")
                         .foregroundStyle(.secondary)
                 }
 
-                Label("Manual self-built updates only", systemImage: "lock.shield")
-                    .foregroundColor(.green)
+                Label("Private, self-built release", systemImage: "lock.shield")
+                    .foregroundStyle(.secondary)
             }
 
             Section("What's New") {
                 ForEach(Changelog.entries) { entry in
                     VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(entry.version)
-                                .font(.system(size: 14, weight: .bold))
-                            Spacer()
-                            Text(entry.date)
+                        Text("\(entry.version) · Initial Release")
+                            .font(.headline)
+
+                        ForEach(entry.highlights, id: \.self) { item in
+                            Label(item, systemImage: "checkmark.circle")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        ForEach(entry.highlights, id: \.self) { item in
-                            HStack(alignment: .top, spacing: 6) {
-                                Text("\u{2022}")
-                                    .foregroundStyle(.secondary)
-                                Text(item)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
                     }
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 2)
                 }
             }
         }
@@ -1373,37 +1297,18 @@ struct DetailPanelView: View {
         .alert(item: $pairingAlert) { alert in
             Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("OK")))
         }
-        // None of these could be undone, and none of them used to ask first.
         .confirmationDialog(
-            pendingDestructiveAction?.title ?? "",
-            isPresented: Binding(
-                get: { pendingDestructiveAction != nil },
-                set: { if !$0 { pendingDestructiveAction = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: pendingDestructiveAction
-        ) { action in
-            Button(action.confirmTitle, role: action == .setupWizard ? nil : .destructive) {
-                perform(action)
-                pendingDestructiveAction = nil
+            "Clear the pairing code?",
+            isPresented: $isConfirmingClearPairing,
+            titleVisibility: .visible
+        ) {
+            Button("Clear Pairing", role: .destructive) {
+                client.clearPairingSecret()
+                pairingCodeInput = ""
             }
-            Button("Cancel", role: .cancel) { pendingDestructiveAction = nil }
-        } message: { action in
-            Text(action.message)
-        }
-    }
-
-    private func perform(_ action: DestructiveAction) {
-        switch action {
-        case .clearPairing:
-            client.clearPairingSecret()
-            pairingCodeInput = ""
-        case .resetPermissions:
-            client.resetScreenCapturePermissions()
-        case .restart:
-            client.restartApp()
-        case .setupWizard:
-            hasCompletedOnboarding = false
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Any connected iPad is disconnected, and both devices will need the same code again.")
         }
     }
 
@@ -1511,7 +1416,7 @@ struct DetailPanelView: View {
 
 // MARK: - Display Overview (arrangement view)
 
-/// A display item in the arrangement view — either the built-in display or a ScreenBridge virtual display.
+/// A display item in the arrangement view — either the built-in display or a Screen Bridge virtual display.
 struct DisplayItem: Identifiable {
     let id: String
     let name: String
@@ -1608,7 +1513,7 @@ struct DisplayOverviewView: View {
             ))
         }
 
-        // Connected ScreenBridge displays
+        // Connected Screen Bridge displays
         for display in client.connectedDisplays {
             let b = display.displayBounds
             let w = b.width > 0 ? b.width : 1920
@@ -1978,13 +1883,13 @@ struct DeviceDetailView: View {
                             Text(res.name).tag(res)
                         }
                     }
-                    InfoTip(text: "Best Fit is tuned for the iPad: compact UI size with HiDPI/native capture for sharper text.")
+                    InfoTip(text: "Best Fit matches the iPad with HiDPI and native capture.")
                 }
 
                 HStack {
                     Toggle("Retina (HiDPI)", isOn: $client.isRetina)
                         .disabled(client.selectedResolution == VirtualDisplayManager.receiverBestFitResolution)
-                    InfoTip(text: "Sharper text for manual resolutions. Best Fit already enables HiDPI automatically.")
+                    InfoTip(text: "Uses HiDPI for sharper text. Best Fit already includes it.")
                 }
             }
 
@@ -1995,7 +1900,7 @@ struct DeviceDetailView: View {
                             Text(quality.name).tag(quality)
                         }
                     }
-                    InfoTip(text: "Higher bitrate reduces H.264 compression artifacts. Native Max needs a strong direct or wired connection.")
+                    InfoTip(text: "Higher bitrate reduces compression. Native Max needs a strong direct connection.")
                 }
 
                 HStack {
@@ -2003,7 +1908,7 @@ struct DeviceDetailView: View {
                         get: { display.audioEnabled },
                         set: { client.setAudioEnabled($0, for: display.id) }
                     ))
-                    InfoTip(text: "Sends Chrome audio to this receiver and mutes Chrome on this Mac when supported.")
+                    InfoTip(text: "Streams Chrome audio to this iPad and mutes it on this Mac.")
                 }
 
                 if display.audioEnabled {
@@ -2117,7 +2022,7 @@ struct DiscoveredDeviceView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .disabled(client.isConnecting(to: service))
-                    InfoTip(text: "Strict modes connect only when Bonjour observed this receiver on the requested interface. Auto lets the system choose.")
+                    InfoTip(text: "Auto chooses the route. A required route never falls back to another connection.")
                 }
             }
 
@@ -2128,13 +2033,13 @@ struct DiscoveredDeviceView: View {
                             Text(res.name).tag(res)
                         }
                     }
-                    InfoTip(text: "Best Fit is the iPad default: compact logical size with a sharper HiDPI backing.")
+                    InfoTip(text: "Best Fit matches the iPad at a sharp HiDPI resolution.")
                 }
 
                 HStack {
                     Toggle("Retina (HiDPI)", isOn: $client.isRetina)
                         .disabled(client.selectedResolution == VirtualDisplayManager.receiverBestFitResolution)
-                    InfoTip(text: "Sharper text for manual resolutions. Best Fit already enables HiDPI automatically.")
+                    InfoTip(text: "Uses HiDPI for sharper text. Best Fit already includes it.")
                 }
             }
 
@@ -2145,12 +2050,12 @@ struct DiscoveredDeviceView: View {
                             Text(quality.name).tag(quality)
                         }
                     }
-                    InfoTip(text: "Raises H.264 bitrate. It improves compression quality but cannot replace real display pixels.")
+                    InfoTip(text: "Raises bitrate to reduce compression. Resolution still controls detail.")
                 }
 
                 HStack {
                     Toggle("Chrome Audio to iPad", isOn: $client.audioStreamingEnabled)
-                    InfoTip(text: "Sends Chrome audio to the receiver and mutes Chrome on this Mac when supported.")
+                    InfoTip(text: "Streams Chrome audio to the iPad and mutes it on this Mac.")
                 }
 
             }
@@ -2212,24 +2117,15 @@ struct InfoTip: View {
         }
         .buttonStyle(.plain)
         .help(text)
+        .accessibilityLabel("More information")
         .popover(isPresented: $isShowing, arrowEdge: .top) {
-            ScrollView {
-                Text(text)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.primary)
-                    .lineSpacing(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-            }
-            .frame(
-                minWidth: 260,
-                idealWidth: 260,
-                maxWidth: 260,
-                minHeight: 44,
-                idealHeight: 68,
-                maxHeight: 120,
-                alignment: .topLeading
-            )
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(.primary)
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 260, alignment: .leading)
+                .padding(12)
         }
     }
 }
@@ -2465,6 +2361,7 @@ struct ConnectionPipeline {
     var videoEncoder: VideoEncoder?
     var audioEncoder: AudioEncoder?
     var processAudioCapture: ProcessAudioTapCapture?
+    var audioPacketSender: AudioPacketSender?
     /// Invalidates delayed display/capture callbacks from an older pipeline
     /// incarnation after a resolution or orientation rebuild.
     var lifecycleGeneration: UInt64 = 0
@@ -2488,8 +2385,6 @@ struct ConnectionPipeline {
     var framesInFlight: Int = 0
     var pendingKeyframePacket: Data?
     var mediaHeartbeatInProgress: Bool = false
-    var audioSendInProgress: Bool = false
-    var pendingAudioPacket: Data?
     var currentAdaptiveBitrate: Int = 0
     var targetAdaptiveBitrate: Int = 0
     var sendLatencyEWMA: TimeInterval = 0
@@ -2607,7 +2502,7 @@ enum ConnectionPhase: String, Equatable {
     }
 }
 
-final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegate, ScreenRecorderDelegate, @unchecked Sendable {
+final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorderDelegate, @unchecked Sendable {
     private static let displayPlacementDefaultsKey = "displayPlacement"
     private static let hiddenDeviceKeysDefaultsKey = "hiddenDeviceKeys"
 
@@ -3022,7 +2917,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
         hiddenDeviceKeys = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenDeviceKeysDefaultsKey) ?? [])
         restorePersistedSettings()
         hasFinishedInitialization = true
-        // ScreenBridge is display-only: all direct control stays on the Mac.
+        // Screen Bridge is display-only: all direct control stays on the Mac.
         UserDefaults.standard.removeObject(forKey: "iPadInputEnabled")
         
         // We can't monitor recursively in init easily, but we can start it.
@@ -3566,6 +3461,25 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
                                     return
                                 }
                                 self.pipelines[connectionId]?.audioSessionKey = authentication.sessionKey
+                                let packetSender = AudioPacketSender(
+                                    connection: audioConnection,
+                                    connectionId: connectionId,
+                                    serviceName: serviceName
+                                ) { [weak self, weak audioConnection] error in
+                                    guard let audioConnection else { return }
+                                    DispatchQueue.main.async { [weak self] in
+                                        self?.handleAudioConnectionEnded(
+                                            audioConnection,
+                                            connectionId: connectionId,
+                                            reason: "send error: \(error)"
+                                        )
+                                    }
+                                }
+                                self.pipelines[connectionId]?.audioPacketSender = packetSender
+                                self.pipelines[connectionId]?.audioEncoder?.delegate = packetSender
+                                packetSender.setPaused(
+                                    self.pipelines[connectionId]?.backgroundGraceStart != nil
+                                )
                                 self.setAudioState(.streaming, for: connectionId)
                                 LogManager.shared.log("AudioConnection: Dedicated audio TCP ready for \(serviceName)")
                                 self.receiveAuxiliary(on: audioConnection, connectionId: connectionId)
@@ -3618,10 +3532,11 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
 
         connection.stateUpdateHandler = nil
         connection.cancel()
+        pipelines[connectionId]?.audioEncoder?.delegate = nil
+        pipelines[connectionId]?.audioPacketSender?.invalidate()
         pipelines[connectionId]?.audioConnection = nil
         pipelines[connectionId]?.audioSessionKey = nil
-        pipelines[connectionId]?.audioSendInProgress = false
-        pipelines[connectionId]?.pendingAudioPacket = nil
+        pipelines[connectionId]?.audioPacketSender = nil
 
         if desiredAudioEnabled(for: connectionId) {
             // A process tap configured as `.muted` must not outlive its output
@@ -3967,62 +3882,12 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
             NSWorkspace.shared.open(privacyURL)
         }
     }
-    
-    func resetScreenCapturePermissions() {
-        LogManager.shared.log("Permissions: Resetting ScreenCapture permission...")
 
-        var allSuccess = true
-
-        // Reset Screen Recording
-        let screenCapture = Process()
-        screenCapture.executableURL = URL(fileURLWithPath: BCConstants.tccutilPath)
-        screenCapture.arguments = ["reset", "ScreenCapture", PrivateBetterCastConstants.senderBundleID]
-        do {
-            try screenCapture.run()
-            screenCapture.waitUntilExit()
-            if screenCapture.terminationStatus == 0 {
-                LogManager.shared.log("Permissions: Screen Recording reset OK")
-            } else {
-                LogManager.shared.log("Permissions: Screen Recording reset failed (Code \(screenCapture.terminationStatus))")
-                allSuccess = false
-            }
-        } catch {
-            LogManager.shared.log("Permissions: Error resetting Screen Recording - \(error)")
-            allSuccess = false
-        }
-
-        if allSuccess {
-            LogManager.shared.log("Permissions: Screen Recording reset. Restarting to re-prompt...")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.restartApp()
-            }
-        } else {
-            LogManager.shared.log("Permissions: Some resets failed. Check Settings manually.")
-            openPrivacySettings()
-        }
-    }
-    
     @MainActor
     func quitApp() {
         NSApplication.shared.terminate(nil)
     }
-    
-    func restartApp() {
-        let url = URL(fileURLWithPath: Bundle.main.bundlePath)
-        let config = NSWorkspace.OpenConfiguration()
-        config.createsNewApplicationInstance = true
-        
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
-            if error == nil {
-                DispatchQueue.main.async {
-                    NSApplication.shared.terminate(nil)
-                }
-            } else {
-                LogManager.shared.log("Sender: Failed to restart - \(error?.localizedDescription ?? "")")
-            }
-        }
-    }
-    
+
     // MARK: - Dynamic Updates
     private var updateDebounceWork: DispatchWorkItem?
 
@@ -4479,6 +4344,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
                                     // grace deadline instead of the 15s heartbeat timeout.
                                     if self.pipelines[connectionId]?.backgroundGraceStart == nil {
                                         self.pipelines[connectionId]?.backgroundGraceStart = Date()
+                                        self.pipelines[connectionId]?.audioPacketSender?.setPaused(true)
                                         LogManager.shared.log("Sender: Receiver \(pipeline.service.name) entered background — grace period started (\(Int(self.backgroundGraceDuration))s), pausing stream, keeping virtual display")
                                     }
                                     return
@@ -4488,6 +4354,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
                                 // active again — end the grace period and resume the stream.
                                 if let graceStart = self.pipelines[connectionId]?.backgroundGraceStart {
                                     self.pipelines[connectionId]?.backgroundGraceStart = nil
+                                    self.pipelines[connectionId]?.audioPacketSender?.setPaused(false)
                                     let away = Int(Date().timeIntervalSince(graceStart))
                                     LogManager.shared.log("Sender: Receiver \(pipeline.service.name) resumed after \(away)s in background — resuming stream")
                                     self.pipelines[connectionId]?.videoEncoder?.forceKeyframe()
@@ -4642,14 +4509,15 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
         pipelines[connectionId]?.videoEncoder = nil
         pipelines[connectionId]?.processAudioCapture?.stop()
         pipelines[connectionId]?.processAudioCapture = nil
+        pipelines[connectionId]?.audioEncoder?.delegate = nil
+        pipelines[connectionId]?.audioPacketSender?.invalidate()
         pipelines[connectionId]?.audioConnection?.cancel()
         pipelines[connectionId]?.audioConnection = nil
         pipelines[connectionId]?.audioSessionKey = nil
         pipelines[connectionId]?.audioEncoder = nil
+        pipelines[connectionId]?.audioPacketSender = nil
         pipelines[connectionId]?.framesInFlight = 0
         pipelines[connectionId]?.pendingKeyframePacket = nil
-        pipelines[connectionId]?.audioSendInProgress = false
-        pipelines[connectionId]?.pendingAudioPacket = nil
         if let dm = pipelines[connectionId]?.virtualDisplayManager {
             dm.destroyDisplay()
             pipelines[connectionId]?.virtualDisplayManager = nil
@@ -4704,7 +4572,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
                 height: res.height,
                 ppi: shouldUseHiDPI ? min(220, res.ppi * 2) : res.ppi,
                 hiDPI: shouldUseHiDPI,
-                name: "ScreenBridge Display (\(serviceName))"
+                name: "Screen Bridge Display (\(serviceName))"
             )
 
             if let displayID = displayManager.createDisplay(resolution: resolution, placement: displayPlacement) {
@@ -4902,7 +4770,6 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
         }
 
         let audioEncoder = AudioEncoder(connectionId: connectionId)
-        audioEncoder.delegate = self
         let processTap = ProcessAudioTapCapture(
             bundleIDPrefixes: ["com.google.Chrome"],
             muteProcess: true
@@ -4951,12 +4818,12 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
         pipeline.audioConnection?.stateUpdateHandler = nil
         pipeline.audioConnection?.cancel()
         pipeline.audioEncoder?.delegate = nil
+        pipeline.audioPacketSender?.invalidate()
         pipelines[connectionId]?.processAudioCapture = nil
         pipelines[connectionId]?.audioConnection = nil
         pipelines[connectionId]?.audioSessionKey = nil
         pipelines[connectionId]?.audioEncoder = nil
-        pipelines[connectionId]?.audioSendInProgress = false
-        pipelines[connectionId]?.pendingAudioPacket = nil
+        pipelines[connectionId]?.audioPacketSender = nil
         setAudioState(.off, for: connectionId)
         if hadAudioResources {
             LogManager.shared.log("Sender: Audio pipeline stopped without rebuilding display for \(pipeline.service.name)")
@@ -5236,104 +5103,4 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
         )
     }
 
-    // AudioEncoderDelegate - Send AAC audio to the specific connection
-    func audioEncoder(_ encoder: AudioEncoder, didEncode data: Data, for connectionId: UUID) {
-        // ProcessAudioTapCapture invokes its handler on a Core Audio queue, while
-        // NetworkClient owns pipeline state on the main queue.
-        guard Thread.isMainThread else {
-            DispatchQueue.main.async { [weak self, weak encoder] in
-                guard let self, let encoder else { return }
-                self.audioEncoder(encoder, didEncode: data, for: connectionId)
-            }
-            return
-        }
-
-        guard let pipeline = pipelines[connectionId],
-              pipeline.audioEncoder === encoder else { return }
-
-        // Background grace: receiver is suspended — don't queue audio either.
-        if pipeline.backgroundGraceStart != nil { return }
-
-        // Legacy receivers (iOS/Mac Swift) don't support audio — skip
-        guard pipeline.supportsTypeByte else { return }
-
-        // Never send media before the auxiliary handshake finishes. Doing so
-        // interleaves AAC frames with the length-prefixed pairing exchange and
-        // corrupts both sides. Audio also never falls back to the main video
-        // transport because protocol v2 assigns each connection one role.
-        guard let audioConnection = pipeline.audioConnection,
-              pipeline.audioSessionKey != nil,
-              pipeline.audioState == .streaming else {
-            return
-        }
-
-        // Audio always uses TCP framing
-        // Format: [4-byte length][1-byte type: 0x02=audio][AAC data]
-        var typedPayload = Data([0x02]) // Audio packet type
-        typedPayload.append(data)
-        var lengthPrefix = UInt32(typedPayload.count).bigEndian
-        var packet = Data(bytes: &lengthPrefix, count: 4)
-        packet.append(typedPayload)
-
-        enqueueAudioPacket(packet, on: audioConnection, for: connectionId)
-    }
-
-    private func enqueueAudioPacket(
-        _ packet: Data,
-        on connection: NWConnection,
-        for connectionId: UUID
-    ) {
-        guard let pipeline = pipelines[connectionId],
-              pipeline.audioConnection === connection,
-              pipeline.audioState == .streaming else { return }
-
-        if pipeline.audioSendInProgress {
-            // AAC-LC packets are independently decodable. Keep only the newest
-            // pending packet so congestion creates a short gap, not seconds of
-            // accumulated playback latency.
-            pipelines[connectionId]?.pendingAudioPacket = packet
-            return
-        }
-
-        pipelines[connectionId]?.audioSendInProgress = true
-        bytesSentWindow += packet.count
-        let serviceName = pipeline.service.name
-        connection.send(content: packet, completion: .contentProcessed { [weak self] error in
-            DispatchQueue.main.async { [weak self] in
-                self?.finishAudioSend(
-                    on: connection,
-                    connectionId: connectionId,
-                    serviceName: serviceName,
-                    error: error
-                )
-            }
-        })
-    }
-
-    private func finishAudioSend(
-        on connection: NWConnection,
-        connectionId: UUID,
-        serviceName: String,
-        error: NWError?
-    ) {
-        guard let pipeline = pipelines[connectionId],
-              pipeline.audioConnection === connection else { return }
-
-        pipelines[connectionId]?.audioSendInProgress = false
-        if let error {
-            pipelines[connectionId]?.pendingAudioPacket = nil
-            LogManager.shared.log("Sender: Audio send error to \(serviceName) (dedicated): \(error)")
-            handleAudioConnectionEnded(
-                connection,
-                connectionId: connectionId,
-                reason: "send error"
-            )
-            return
-        }
-
-        if let pending = pipelines[connectionId]?.pendingAudioPacket {
-            pipelines[connectionId]?.pendingAudioPacket = nil
-            enqueueAudioPacket(pending, on: connection, for: connectionId)
-        }
-    }
 }

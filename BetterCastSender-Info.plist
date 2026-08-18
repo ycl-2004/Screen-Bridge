@@ -5,38 +5,38 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>ScreenBridge</string>
+    <string>Screen Bridge</string>
     <key>CFBundleIdentifier</key>
     <string>com.yichen.yccast.sender</string>
     <key>CFBundleDisplayName</key>
-    <string>ScreenBridge</string>
+    <string>Screen Bridge</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>ScreenBridge</string>
+    <string>Screen Bridge</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>8.0</string>
+    <string>1.0</string>
     <key>CFBundleVersion</key>
-    <string>8</string>
+    <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>ScreenBridge finds your iPad on this local network and streams the extended display to it.</string>
+    <string>Screen Bridge finds your iPad on this local network and streams the extended display to it.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_yc-cast._tcp</string>
     </array>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>ScreenBridge needs to capture your screen to stream it to the receiver.</string>
+    <string>Screen Bridge needs to capture your screen to stream it to the receiver.</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>ScreenBridge needs to capture selected app audio so it can play on the receiver instead of this Mac.</string>
+    <string>Screen Bridge needs to capture selected app audio so it can play on the receiver instead of this Mac.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>ScreenBridge needs access to audio for system sound capture (if enabled).</string>
+    <string>Screen Bridge needs access to audio for system sound capture (if enabled).</string>
 </dict>
 </plist>

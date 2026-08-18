@@ -9,11 +9,23 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
         // Required: configure audio session before AVSampleBufferDisplayLayer works on iOS.
         // Without this, FigApplicationStateMonitor throws errors and frames don't render.
+        // Preferred values are requested before activation and actual values are
+        // read afterwards per Apple QA1631:
+        // https://developer.apple.com/library/archive/qa/qa1631/_index.html
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playback, mode: .moviePlayback)
+            try audioSession.setPreferredSampleRate(BCConstants.preferredAudioSampleRate)
+            try audioSession.setPreferredIOBufferDuration(BCConstants.audioIOBufferDuration)
             try audioSession.setActive(true)
-            LogManager.shared.log("AppDelegate: audio session configured")
+            let actualIOBufferMilliseconds = String(
+                format: "%.2f",
+                audioSession.ioBufferDuration * 1_000
+            )
+            LogManager.shared.log(
+                "AppDelegate: audio session configured — actual sampleRate=\(Int(audioSession.sampleRate))Hz, "
+                    + "ioBuffer=\(actualIOBufferMilliseconds)ms"
+            )
         } catch {
             LogManager.shared.log("AppDelegate: audio session setup failed — \(error)")
         }

@@ -131,7 +131,7 @@ public struct PairingAuthenticator {
         return Data(digest)
     }
 
-    /// Strips the separators a user might type, so `"ScreenBridge 2026"` and
+    /// Strips the separators a user might type, so `"Screen Bridge 2026"` and
     /// `"yccast2026"` are the same secret on both devices.
     public static func normalize(_ userInput: String) -> String {
         userInput

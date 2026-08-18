@@ -303,7 +303,7 @@ final class NetworkListenerIOS: @unchecked Sendable {
             // Only announce "waiting" while no session is active — the listener
             // also reports ready on restarts during a live session.
             if mainConnection == nil {
-                notifyState(.waiting, "Ready. Waiting for Sender...")
+                notifyState(.waiting, "Ready · Waiting for Mac…")
             }
         case .failed(let error):
             LogManager.shared.log("ReceiverIOS (\(type)): Failed \(error) — restarting...")
@@ -518,12 +518,12 @@ final class NetworkListenerIOS: @unchecked Sendable {
                 pendingLossNotification = false
                 notifyState(.connectionLost, "Connection lost")
             } else {
-                notifyState(.disconnected, "Device disconnected")
+                notifyState(.disconnected, "Mac disconnected")
             }
         } else if audioConnection === connection {
             audioConnection = nil
             audioPlayer?.stop()
-            // The media/control transport remains authoritative. Protocol v2
+            // The media/control transport remains authoritative. Protocol v3
             // never falls back to audio on it, so do not publish a disconnect;
             // the sender will reattach a fresh auxiliary connection.
             LogManager.shared.log("ReceiverIOS: Auxiliary audio transport disconnected; media session remains active")
@@ -729,9 +729,12 @@ final class NetworkListenerIOS: @unchecked Sendable {
                 // The sender is authenticated, but the length it sends is still
                 // untrusted input: an unbounded value here asked the socket for up
                 // to ~4 GiB and stalled the receiver under memory pressure.
+                let frameLimit = self?.audioConnection === connection
+                    ? StreamFraming.maxAudioFrameBytes
+                    : StreamFraming.maxMediaFrameBytes
                 let bodyLength: Int
                 do {
-                    bodyLength = try StreamFraming.validateBodyLength(rawLength, limit: StreamFraming.maxMediaFrameBytes)
+                    bodyLength = try StreamFraming.validateBodyLength(rawLength, limit: frameLimit)
                 } catch {
                     LogManager.shared.log("ReceiverIOS (TCP): Rejected frame length \(rawLength) (\(error)) — closing connection")
                     self?.removeConnection(connection)
@@ -801,7 +804,11 @@ final class NetworkListenerIOS: @unchecked Sendable {
                 lastVideoAccessUnitReceived = Date()
                 videoDecoder?.decode(data: payload)
             } else if firstByte == 0x02 {
-                audioPlayer?.decode(aacData: payload)
+                do {
+                    audioPlayer?.decode(packet: try FramedAudioPacket.decode(Data(payload)))
+                } catch {
+                    LogManager.shared.log("ReceiverIOS: Rejected malformed audio packet: \(error)")
+                }
             } else if firstByte == 0x03 {
                 LogManager.shared.log("ReceiverIOS: Sender stopped sharing")
                 removeConnection(connection)

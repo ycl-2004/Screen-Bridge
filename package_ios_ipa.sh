@@ -1,17 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="${VERSION:-v8}"
+VERSION="${VERSION:-v1}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 PROJECT_PATH="${PROJECT_PATH:-BetterCastIOS.xcodeproj}"
 SCHEME="${SCHEME:-BetterCastReceiverIOS}"
 EXPORT_OPTIONS_PLIST="${EXPORT_OPTIONS_PLIST:-}"
-OUTPUT_IPA="${OUTPUT_IPA:-ScreenBridge-Receiver-iOS-${VERSION}.ipa}"
+OUTPUT_IPA="${OUTPUT_IPA:-Screen-Bridge-iPad-${VERSION}.ipa}"
 OVERWRITE="${OVERWRITE:-0}"
 ALLOW_PROVISIONING_UPDATES="${ALLOW_PROVISIONING_UPDATES:-0}"
 
 echo "=================================="
-echo "  ScreenBridge iOS Archive + Export $VERSION"
+echo "  Screen Bridge iOS Archive + Export $VERSION"
 echo "=================================="
 
 if [ -z "$EXPORT_OPTIONS_PLIST" ] || [ ! -f "$EXPORT_OPTIONS_PLIST" ]; then
@@ -35,7 +35,7 @@ if [ -e "$OUTPUT_IPA" ] && [ "$OVERWRITE" != "1" ]; then
 fi
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/yc-cast-ipa.XXXXXX")"
-ARCHIVE_PATH="$WORK_DIR/ScreenBridge.xcarchive"
+ARCHIVE_PATH="$WORK_DIR/Screen Bridge.xcarchive"
 EXPORT_PATH="$WORK_DIR/export"
 cleanup() {
     rm -rf "$WORK_DIR"

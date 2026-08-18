@@ -73,7 +73,7 @@ final class ProcessAudioTapCapture {
         }
 
         let tapDescription = CATapDescription(stereoMixdownOfProcesses: processIDs)
-        tapDescription.name = "ScreenBridge Chrome Audio"
+        tapDescription.name = "Screen Bridge Chrome Audio"
         tapDescription.isPrivate = true
         tapDescription.muteBehavior = muteProcess ? .muted : .unmuted
 
@@ -185,7 +185,7 @@ final class ProcessAudioTapCapture {
         ]
 
         let aggregateDictionary: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "ScreenBridge Process Audio",
+            kAudioAggregateDeviceNameKey: "Screen Bridge Process Audio",
             kAudioAggregateDeviceUIDKey: aggregateUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceTapAutoStartKey: true,

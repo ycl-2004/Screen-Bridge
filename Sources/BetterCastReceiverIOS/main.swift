@@ -12,7 +12,7 @@ UIApplicationMain(
 
 #else
 
-print("ScreenBridge iOS receiver is intended for iOS devices only.")
+print("Screen Bridge iOS receiver is intended for iOS devices only.")
 print("Please select an iOS Simulator or Device in Xcode to run this target.")
 
 #endif

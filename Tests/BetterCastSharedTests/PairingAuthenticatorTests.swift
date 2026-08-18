@@ -2,8 +2,8 @@ import XCTest
 @testable import BetterCastShared
 
 final class PairingAuthenticatorTests: XCTestCase {
-    func testProtocolVersionIncludesSessionRolesAndCapabilities() {
-        XCTAssertEqual(PrivateBetterCastConstants.protocolVersion, 2)
+    func testProtocolVersionIncludesTimedAudioPackets() {
+        XCTAssertEqual(PrivateBetterCastConstants.protocolVersion, 3)
     }
 
     func testMediaHelloStartsWithoutSessionAndRoundTrips() throws {

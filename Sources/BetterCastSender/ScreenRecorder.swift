@@ -236,7 +236,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             audioEncoder?.encode(sampleBuffer: sampleBuffer)
 
         case .microphone:
-            // Never requested. ScreenBridge routes selected app audio, not the mic.
+            // Never requested. Screen Bridge routes selected app audio, not the mic.
             break
 
         @unknown default:

@@ -1,17 +1,17 @@
-# ScreenBridge / BetterCast Project Entry
+# Screen Bridge / BetterCast Project Entry
 
 Use this file as the first stop when handing the repository to Claude Code or another coding agent. It explains what the project is, which path is current, where the important code lives, and how the remaining modules relate to the main product.
 
 ## One-Line Summary
 
-ScreenBridge turns an iPad into a display-only extended screen for a Mac. The Mac creates a virtual display, captures it, encodes video/audio, and streams it over a local authenticated connection to an iPad receiver.
+Screen Bridge turns an iPad into a display-only extended screen for a Mac. The Mac creates a virtual display, captures it, encodes video/audio, and streams it over a local authenticated connection to an iPad receiver.
 
 ## Naming Reality
 
-- User-facing product name: `ScreenBridge`.
+- User-facing product name: `Screen Bridge`.
 - Historical source/package name: `BetterCast`.
 - Many Swift targets, folders, Android packages, and C++ files still use `BetterCast*`.
-- Do not assume `BetterCast` means a separate product. In this repository it is mostly legacy naming for the ScreenBridge codebase.
+- Do not assume `BetterCast` means a separate product. In this repository it is mostly legacy naming for the Screen Bridge codebase.
 
 ## Current Product Path
 
@@ -155,7 +155,7 @@ neither discover nor authenticate it. Keeping it around implied macOS could act
 as a receiver, which was not true.
 
 Recover it from git history if a macOS receiver is ever wanted again; it would
-need a protocol v2 listener written from scratch (see `NetworkListenerIOS.swift`
+need a protocol v3 listener written from scratch (see `NetworkListenerIOS.swift`
 for the receiver side of the handshake).
 
 ### Android Receiver/Sender
@@ -164,7 +164,7 @@ Path: `Sources/BetterCastReceiverAndroid/`
 
 This is a Kotlin/Jetpack Compose Android module under the historical BetterCast package name. It has receiver networking, sender/screen-capture code, input models, and Android-specific UI.
 
-Use it only when the task is explicitly Android-related. For the current ScreenBridge Mac+iPad workflow, treat Android as dormant/secondary.
+Use it only when the task is explicitly Android-related. For the current Screen Bridge Mac+iPad workflow, treat Android as dormant/secondary.
 
 Potential command from the Android folder:
 
@@ -183,13 +183,14 @@ Read `Sources/BetterCastReceiverDesktop/BUILD.md` before working here. Treat thi
 ### Packaging, Assets, and Release Notes
 
 - `make_app.sh` builds the macOS app bundle and DMG.
-- `package_ios_ipa.sh` packages an already-built iOS receiver binary into an IPA-style payload.
+- `package_ios_ipa.sh` archives and exports a signed iOS receiver through Xcode.
 - `BetterCastSender-Info.plist` defines macOS bundle metadata. The app currently
   requests no restricted entitlements, so `make_app.sh` signs without embedding
   an empty entitlement blob.
 - `Sources/BetterCastReceiverIOS/Info.plist` defines iOS receiver metadata.
 - `assets/branding/BetterCastIcon.icns` is the macOS app icon asset.
-- `docs/release-notes/v8.md` contains release notes for the current v8 work.
+- `docs/release-notes/v1.md` contains release notes for the current v1 release.
+- `docs/release-notes/v8.md` is retained as historical release documentation.
 - `docs/github-readiness.md` captures public-readiness cleanup notes.
 
 ## Protocol and Runtime Relationship
@@ -274,7 +275,7 @@ For Windows/Linux desktop work, follow `Sources/BetterCastReceiverDesktop/BUILD.
 ## Agent Notes
 
 - Prefer small, scoped changes. This repository mixes active and dormant modules.
-- Preserve the current user-facing `ScreenBridge` wording unless the task is explicitly about renaming internal code.
+- Preserve the current user-facing `Screen Bridge` wording unless the task is explicitly about renaming internal code.
 - Do not do broad internal renames from `BetterCast*` to `YCCast*` as an incidental cleanup.
 - If changing behavior or setup, update `README.md` or an ADR as appropriate.
 - If changing security semantics, update tests under `Tests/BetterCastSharedTests/` and the relevant ADR.

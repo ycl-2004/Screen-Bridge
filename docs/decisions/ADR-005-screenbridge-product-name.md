@@ -1,4 +1,4 @@
-# ADR-005: Adopt ScreenBridge as the Product Name
+# ADR-005: Adopt Screen Bridge as the Product Name
 
 ## Status
 
@@ -6,17 +6,19 @@ Accepted
 
 ## Date
 
-2026-08-15
+2026-08-18
 
 ## Context
 
-The project currently presents itself as YC Cast, while the product's central promise is more specific: a Mac creates an extended display and ScreenBridge renders that display on an iPad. “Cast” suggests media casting or screen mirroring, which is less precise for a true second-screen workflow.
+The project currently presents itself as YC Cast, while the product's central promise is more specific: a Mac creates an extended display and Screen Bridge renders that display on an iPad. “Cast” suggests media casting or screen mirroring, which is less precise for a true second-screen workflow.
 
 The repository also contains historical BetterCast module names, bundle identifiers, Keychain identifiers, and the `_yc-cast._tcp` Bonjour service. Changing those identifiers would create compatibility and migration risk without improving the user's understanding of the product.
 
 ## Decision
 
-Adopt **ScreenBridge** as the user-facing product and repository name.
+Adopt **Screen Bridge** as the user-facing product name. Use
+`Screen-Bridge` for the GitHub repository slug because repository URLs cannot
+preserve a literal space.
 
 Use the descriptor:
 
@@ -43,4 +45,4 @@ Maximally explicit, but too generic to serve as a durable product identity.
 - New users can infer the product's bridge/second-display role from the name and descriptor.
 - Existing app installs and pairing state remain compatible because bundle, Keychain, protocol, and Bonjour identifiers do not change.
 - Historical audit entries may continue to mention YC Cast or BetterCast when describing the state at the time of that record.
-- The GitHub repository URL changes to `https://github.com/ycl-2004/screenbridge`; GitHub's old repository URL redirect should preserve existing links, while local clones should update their `origin` URL.
+- The GitHub repository URL changes to `https://github.com/ycl-2004/Screen-Bridge`; GitHub's old repository URL redirect should preserve existing links, while local clones should update their `origin` URL.

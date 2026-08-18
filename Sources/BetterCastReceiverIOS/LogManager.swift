@@ -12,7 +12,7 @@ final class LogManager: @unchecked Sendable {
 
     private init() {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        logFileURL = documents.appendingPathComponent("ScreenBridge-Receiver-Diagnostics.log")
+        logFileURL = documents.appendingPathComponent("Screen Bridge-Receiver-Diagnostics.log")
     }
 
     func log(_ message: String) {

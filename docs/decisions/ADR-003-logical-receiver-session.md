@@ -5,7 +5,7 @@
 
 ## Context
 
-ScreenBridge opens a primary TCP connection for video/control and may open a second
+Screen Bridge opens a primary TCP connection for video/control and may open a second
 TCP connection for Chrome audio. The iPad previously stored both in one array.
 Any connection could publish the receiver's global UI state, and control
 messages were broadcast to both. As a result, an auxiliary audio timeout could
