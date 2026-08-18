@@ -29,6 +29,9 @@ public enum StreamFraming {
     /// below this; the limit exists to bound the worst case, not to shape traffic.
     public static let maxVideoFrameBytes = 16 * 1024 * 1024
 
+    /// Type byte, fixed audio header, and one encoded AAC-LC access unit.
+    public static let maxAudioFrameBytes = 64 * 1024
+
     /// Used where video and audio share a connection and the type is not yet known.
     public static var maxMediaFrameBytes: Int { maxVideoFrameBytes }
 

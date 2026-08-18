@@ -26,6 +26,7 @@
 		BC1000020000000000000005 /* AdaptiveBitratePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC2000020000000000000005 /* AdaptiveBitratePolicy.swift */; };
 		BC1000020000000000000006 /* PipelineUpdatePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC2000020000000000000006 /* PipelineUpdatePolicy.swift */; };
 		BC1000020000000000000007 /* ReceiverSessionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC2000020000000000000007 /* ReceiverSessionPolicy.swift */; };
+		BC1000020000000000000008 /* AudioStreamingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC2000020000000000000008 /* AudioStreamingPolicy.swift */; };
 		BC1000030000000000000001 /* BetterCastShared.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BC2000030000000000000001 /* BetterCastShared.framework */; };
 		BC1000030000000000000002 /* BetterCastShared.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = BC2000030000000000000001 /* BetterCastShared.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		BC1000040000000000000001 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BC2000040000000000000001 /* UIKit.framework */; };
@@ -85,6 +86,7 @@
 		BC2000020000000000000005 /* AdaptiveBitratePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdaptiveBitratePolicy.swift; sourceTree = "<group>"; };
 		BC2000020000000000000006 /* PipelineUpdatePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PipelineUpdatePolicy.swift; sourceTree = "<group>"; };
 		BC2000020000000000000007 /* ReceiverSessionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiverSessionPolicy.swift; sourceTree = "<group>"; };
+		BC2000020000000000000008 /* AudioStreamingPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioStreamingPolicy.swift; sourceTree = "<group>"; };
 		BC2000030000000000000001 /* BetterCastShared.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = BetterCastShared.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		BC2000040000000000000001 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		BC2000040000000000000002 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
@@ -169,6 +171,7 @@
 				BC2000020000000000000005 /* AdaptiveBitratePolicy.swift */,
 				BC2000020000000000000006 /* PipelineUpdatePolicy.swift */,
 				BC2000020000000000000007 /* ReceiverSessionPolicy.swift */,
+				BC2000020000000000000008 /* AudioStreamingPolicy.swift */,
 			);
 			path = BetterCastShared;
 			sourceTree = "<group>";
@@ -316,6 +319,7 @@
 				BC1000020000000000000005 /* AdaptiveBitratePolicy.swift in Sources */,
 				BC1000020000000000000006 /* PipelineUpdatePolicy.swift in Sources */,
 				BC1000020000000000000007 /* ReceiverSessionPolicy.swift in Sources */,
+				BC1000020000000000000008 /* AudioStreamingPolicy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -30,9 +30,19 @@ into seconds of latency.
 - Shared infrastructure paths permit two in-flight video packets. Verified
   AWDL and cable paths permit four. Every path retains at most one newest
   recovery keyframe, and P-frames are dropped once its bounded window is full.
-- Auxiliary audio permits one in-flight AAC packet and retains only the newest
-  pending packet. Media heartbeats also permit only one in-flight write, so no
-  media class can grow an unbounded Network.framework queue.
+- Auxiliary audio sends from its own user-interactive serial queue. It permits
+  one in-flight AAC packet plus seven pending FIFO packets (about 171 ms total
+  at 48 kHz). When full it drops the oldest waiting packet and records queue
+  depth, drop count, and send-latency EWMA. Media heartbeats still permit only
+  one in-flight write, so no media class can grow an unbounded
+  Network.framework queue.
+- Protocol v3 prefixes each AAC payload with sequence, sample time, sample
+  count, codec, and flags. The receiver rejects malformed headers and reports
+  sequence gaps instead of treating missing audio as unknowable timing noise.
+- The receiver starts and resumes after five decoded AAC buffers (~107 ms),
+  caps decoded audio at ten buffers, and returns to buffering whenever playback
+  drains to zero. Its AudioSession requests 48 kHz and a 10 ms hardware buffer
+  before activation, then records the values iOS actually granted.
 - Send-completion latency and bounded-queue drops feed a pure adaptive bitrate
   policy. The user-selected quality is the upper bound and 5 Mbps is the normal
   lower bound.
@@ -51,7 +61,9 @@ when a nominally fast direct route stalls. Congestion may reduce temporary
 picture quality or drop motion frames, which is an intentional trade for keeping
 the newest screen state responsive.
 
-The health model and bitrate recommendation are pure and covered by shared
-tests. Audio congestion may create a brief gap instead of delayed playback;
-that is the same newest-state-first tradeoff as video. Real-device validation
-is still required to tune thresholds across AWDL, router Wi-Fi, and cable paths.
+The health, bitrate, audio FIFO, timed-packet framing, sequence tracking, and
+jitter-buffer transitions are pure and covered by shared tests. Audio now pays
+about 107 ms of startup/recovery buffering and can accumulate at most about
+171 ms on the sender; that bounded latency is the explicit trade for continuity.
+Real-device validation is still required to tune thresholds across AWDL,
+router Wi-Fi, and cable paths.

@@ -2,9 +2,10 @@
 import Foundation
 import AVFoundation
 import AudioToolbox
+import BetterCastShared
 
-/// Decodes raw AAC-LC frames and plays them via AVAudioEngine.
-/// Expects raw AAC packets (no ADTS headers) as produced by the Mac audio encoder.
+/// Decodes timed AAC-LC packets and plays them via AVAudioEngine.
+/// The AAC payload remains raw (no ADTS headers).
 final class AudioPlayerIOS: @unchecked Sendable {
 
     private var audioEngine: AVAudioEngine?
@@ -16,21 +17,16 @@ final class AudioPlayerIOS: @unchecked Sendable {
 
     private var outputFormat: AVAudioFormat?
     private var engineStarted = false
-    private var playerStarted = false
     private var decodeCount = 0
     private var droppedCount = 0
+    private var underrunCount = 0
+    private var sequenceTracker = AudioSequenceTracker()
     private var isInterrupted = false
     private let queue = DispatchQueue(label: "com.bettercast.audio-player", qos: .userInteractive)
     private let queueKey = DispatchSpecificKey<Void>()
     private var notificationObservers: [NSObjectProtocol] = []
 
-    // Jitter buffer management
-    // At 48kHz with 1024-frame AAC packets, each buffer is ~21ms.
-    // Start after ~64ms and cap around ~213ms. This trades a small latency bump
-    // for much better continuity when video packets briefly block the TCP stream.
-    private var pendingBuffers: Int = 0
-    private let startPendingBuffers: Int = 3
-    private let maxPendingBuffers: Int = 10
+    private var jitterBuffer = AudioJitterBufferState()
 
     // Shared state for the converter input callback
     fileprivate var currentPacketData: Data?
@@ -70,10 +66,6 @@ final class AudioPlayerIOS: @unchecked Sendable {
 
         outputFormat = format
         engine.connect(player, to: engine.mainMixerNode, format: format)
-
-        // Keep the hardware buffer low; continuity is handled by our packet jitter buffer.
-        let session = AVAudioSession.sharedInstance()
-        try? session.setPreferredIOBufferDuration(BCConstants.audioIOBufferDuration)
 
         self.audioEngine = engine
         self.playerNode = player
@@ -137,8 +129,8 @@ final class AudioPlayerIOS: @unchecked Sendable {
         playerNode?.stop()
         audioEngine?.stop()
         engineStarted = false
-        playerStarted = false
-        pendingBuffers = 0
+        jitterBuffer.reset()
+        sequenceTracker.reset()
         currentPacketData = nil
         currentPacketConsumed = false
     }
@@ -191,7 +183,10 @@ final class AudioPlayerIOS: @unchecked Sendable {
         }
 
         audioConverter = converter
-        LogManager.shared.log("AudioPlayer: AAC decoder ready (48kHz stereo, start \(startPendingBuffers), max \(maxPendingBuffers) buffers)")
+        LogManager.shared.log(
+            "AudioPlayer: AAC decoder ready (48kHz stereo, start \(AudioJitterBufferState.startPendingBuffers), "
+                + "max \(AudioJitterBufferState.maxPendingBuffers) buffers)"
+        )
     }
 
     private func startEngineIfNeeded() {
@@ -205,36 +200,34 @@ final class AudioPlayerIOS: @unchecked Sendable {
         }
     }
 
-    private func startPlaybackIfReady() {
-        guard !playerStarted, pendingBuffers >= startPendingBuffers, let player = playerNode else { return }
-        player.play()
-        playerStarted = true
-        LogManager.shared.log("AudioPlayer: Playback started with \(pendingBuffers) buffered packets")
-    }
-
     // MARK: - Public API
 
-    func decode(aacData: Data) {
+    func decode(packet: FramedAudioPacket) {
         queue.async { [weak self] in
-            self?.decodeOnQueue(aacData: aacData)
+            self?.decodeOnQueue(packet: packet)
         }
     }
 
-    private func decodeOnQueue(aacData: Data) {
+    private func decodeOnQueue(packet: FramedAudioPacket) {
+        guard packet.header.codec == .aacLC else { return }
+        recordSequence(packet.header.sequence)
+
+        let aacData = packet.payload
         // Skip tiny silence frames (< 10 bytes)
         guard aacData.count >= 10, !isInterrupted else { return }
 
         setupConverter()
         startEngineIfNeeded()
 
-        guard let converter = audioConverter,
+        guard engineStarted,
+              let converter = audioConverter,
               let format = outputFormat else { return }
 
         // Drop frames if too many buffers are queued (prevents latency buildup)
-        if pendingBuffers >= maxPendingBuffers {
+        if jitterBuffer.shouldDropIncomingBuffer {
             droppedCount += 1
             if droppedCount % 50 == 1 {
-                LogManager.shared.log("AudioPlayer: Dropping audio packet to cap latency (pending: \(pendingBuffers), dropped: \(droppedCount))")
+                LogManager.shared.log("AudioPlayer: Dropping audio packet to cap latency (pending: \(jitterBuffer.pendingBuffers), dropped: \(droppedCount))")
             }
             return
         }
@@ -244,7 +237,7 @@ final class AudioPlayerIOS: @unchecked Sendable {
         currentPacketConsumed = false
 
         // Decode one AAC frame (1024 samples)
-        let frameCount: UInt32 = 1024
+        let frameCount = UInt32(packet.header.sampleCount)
         guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return }
         pcmBuffer.frameLength = frameCount
 
@@ -264,24 +257,50 @@ final class AudioPlayerIOS: @unchecked Sendable {
 
         if status == noErr && outputDataPacketSize > 0 {
             pcmBuffer.frameLength = outputDataPacketSize
-            pendingBuffers += 1
+            let shouldStartPlayback = jitterBuffer.bufferScheduled()
             playerNode?.scheduleBuffer(pcmBuffer) { [weak self] in
                 self?.queue.async { [weak self] in
                     guard let self else { return }
-                    self.pendingBuffers = max(self.pendingBuffers - 1, 0)
+                    if self.jitterBuffer.bufferCompleted() {
+                        self.playerNode?.pause()
+                        self.underrunCount += 1
+                        LogManager.shared.log(
+                            "AudioPlayer: Underrun \(self.underrunCount); buffering \(AudioJitterBufferState.startPendingBuffers) packets before resume"
+                        )
+                    }
                 }
             }
-            startPlaybackIfReady()
+            if shouldStartPlayback, let player = playerNode {
+                player.play()
+                LogManager.shared.log(
+                    "AudioPlayer: Playback started/resumed with \(jitterBuffer.pendingBuffers) buffered packets"
+                )
+            }
 
             decodeCount += 1
             if decodeCount % 100 == 1 {
-                LogManager.shared.log("AudioPlayer: Decoded packet \(decodeCount), \(outputDataPacketSize) frames, pending: \(pendingBuffers)")
+                LogManager.shared.log("AudioPlayer: Decoded packet \(decodeCount), \(outputDataPacketSize) frames, pending: \(jitterBuffer.pendingBuffers)")
             }
         } else if status != noErr {
             decodeCount += 1
             if decodeCount % 50 == 1 {
                 LogManager.shared.log("AudioPlayer: Decode failed (status \(status))")
             }
+        }
+    }
+
+    private func recordSequence(_ sequence: UInt32) {
+        switch sequenceTracker.observe(sequence) {
+        case .gap(let expected, let received, let missing):
+            LogManager.shared.log(
+                "AudioPlayer: Sequence gap — expected \(expected), received \(received), missing \(missing)"
+            )
+        case .nonMonotonic(let expected, let received):
+            LogManager.shared.log(
+                "AudioPlayer: Non-monotonic sequence — expected \(expected), received \(received)"
+            )
+        case nil:
+            break
         }
     }
 

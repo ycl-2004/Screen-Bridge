@@ -155,7 +155,7 @@ neither discover nor authenticate it. Keeping it around implied macOS could act
 as a receiver, which was not true.
 
 Recover it from git history if a macOS receiver is ever wanted again; it would
-need a protocol v2 listener written from scratch (see `NetworkListenerIOS.swift`
+need a protocol v3 listener written from scratch (see `NetworkListenerIOS.swift`
 for the receiver side of the handshake).
 
 ### Android Receiver/Sender

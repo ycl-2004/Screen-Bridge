@@ -8,6 +8,8 @@ import Foundation
 /// format values. Duplicated constants that nothing reads drift away from the
 /// real ones and mislead the next reader.
 enum BCConstants {
-    /// Preferred audio IO buffer duration (seconds). Lower = lower latency.
-    static let audioIOBufferDuration: TimeInterval = 0.005
+    static let preferredAudioSampleRate: Double = 48_000
+    /// Ten milliseconds reduces callback pressure while packet buffering owns
+    /// the larger network-jitter budget.
+    static let audioIOBufferDuration: TimeInterval = 0.010
 }

@@ -2465,6 +2465,7 @@ struct ConnectionPipeline {
     var videoEncoder: VideoEncoder?
     var audioEncoder: AudioEncoder?
     var processAudioCapture: ProcessAudioTapCapture?
+    var audioPacketSender: AudioPacketSender?
     /// Invalidates delayed display/capture callbacks from an older pipeline
     /// incarnation after a resolution or orientation rebuild.
     var lifecycleGeneration: UInt64 = 0
@@ -2488,8 +2489,6 @@ struct ConnectionPipeline {
     var framesInFlight: Int = 0
     var pendingKeyframePacket: Data?
     var mediaHeartbeatInProgress: Bool = false
-    var audioSendInProgress: Bool = false
-    var pendingAudioPacket: Data?
     var currentAdaptiveBitrate: Int = 0
     var targetAdaptiveBitrate: Int = 0
     var sendLatencyEWMA: TimeInterval = 0
@@ -2607,7 +2606,7 @@ enum ConnectionPhase: String, Equatable {
     }
 }
 
-final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegate, ScreenRecorderDelegate, @unchecked Sendable {
+final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorderDelegate, @unchecked Sendable {
     private static let displayPlacementDefaultsKey = "displayPlacement"
     private static let hiddenDeviceKeysDefaultsKey = "hiddenDeviceKeys"
 
@@ -3566,6 +3565,25 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
                                     return
                                 }
                                 self.pipelines[connectionId]?.audioSessionKey = authentication.sessionKey
+                                let packetSender = AudioPacketSender(
+                                    connection: audioConnection,
+                                    connectionId: connectionId,
+                                    serviceName: serviceName
+                                ) { [weak self, weak audioConnection] error in
+                                    guard let audioConnection else { return }
+                                    DispatchQueue.main.async { [weak self] in
+                                        self?.handleAudioConnectionEnded(
+                                            audioConnection,
+                                            connectionId: connectionId,
+                                            reason: "send error: \(error)"
+                                        )
+                                    }
+                                }
+                                self.pipelines[connectionId]?.audioPacketSender = packetSender
+                                self.pipelines[connectionId]?.audioEncoder?.delegate = packetSender
+                                packetSender.setPaused(
+                                    self.pipelines[connectionId]?.backgroundGraceStart != nil
+                                )
                                 self.setAudioState(.streaming, for: connectionId)
                                 LogManager.shared.log("AudioConnection: Dedicated audio TCP ready for \(serviceName)")
                                 self.receiveAuxiliary(on: audioConnection, connectionId: connectionId)
@@ -3618,10 +3636,11 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
 
         connection.stateUpdateHandler = nil
         connection.cancel()
+        pipelines[connectionId]?.audioEncoder?.delegate = nil
+        pipelines[connectionId]?.audioPacketSender?.invalidate()
         pipelines[connectionId]?.audioConnection = nil
         pipelines[connectionId]?.audioSessionKey = nil
-        pipelines[connectionId]?.audioSendInProgress = false
-        pipelines[connectionId]?.pendingAudioPacket = nil
+        pipelines[connectionId]?.audioPacketSender = nil
 
         if desiredAudioEnabled(for: connectionId) {
             // A process tap configured as `.muted` must not outlive its output
@@ -4479,6 +4498,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
                                     // grace deadline instead of the 15s heartbeat timeout.
                                     if self.pipelines[connectionId]?.backgroundGraceStart == nil {
                                         self.pipelines[connectionId]?.backgroundGraceStart = Date()
+                                        self.pipelines[connectionId]?.audioPacketSender?.setPaused(true)
                                         LogManager.shared.log("Sender: Receiver \(pipeline.service.name) entered background — grace period started (\(Int(self.backgroundGraceDuration))s), pausing stream, keeping virtual display")
                                     }
                                     return
@@ -4488,6 +4508,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
                                 // active again — end the grace period and resume the stream.
                                 if let graceStart = self.pipelines[connectionId]?.backgroundGraceStart {
                                     self.pipelines[connectionId]?.backgroundGraceStart = nil
+                                    self.pipelines[connectionId]?.audioPacketSender?.setPaused(false)
                                     let away = Int(Date().timeIntervalSince(graceStart))
                                     LogManager.shared.log("Sender: Receiver \(pipeline.service.name) resumed after \(away)s in background — resuming stream")
                                     self.pipelines[connectionId]?.videoEncoder?.forceKeyframe()
@@ -4642,14 +4663,15 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
         pipelines[connectionId]?.videoEncoder = nil
         pipelines[connectionId]?.processAudioCapture?.stop()
         pipelines[connectionId]?.processAudioCapture = nil
+        pipelines[connectionId]?.audioEncoder?.delegate = nil
+        pipelines[connectionId]?.audioPacketSender?.invalidate()
         pipelines[connectionId]?.audioConnection?.cancel()
         pipelines[connectionId]?.audioConnection = nil
         pipelines[connectionId]?.audioSessionKey = nil
         pipelines[connectionId]?.audioEncoder = nil
+        pipelines[connectionId]?.audioPacketSender = nil
         pipelines[connectionId]?.framesInFlight = 0
         pipelines[connectionId]?.pendingKeyframePacket = nil
-        pipelines[connectionId]?.audioSendInProgress = false
-        pipelines[connectionId]?.pendingAudioPacket = nil
         if let dm = pipelines[connectionId]?.virtualDisplayManager {
             dm.destroyDisplay()
             pipelines[connectionId]?.virtualDisplayManager = nil
@@ -4902,7 +4924,6 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
         }
 
         let audioEncoder = AudioEncoder(connectionId: connectionId)
-        audioEncoder.delegate = self
         let processTap = ProcessAudioTapCapture(
             bundleIDPrefixes: ["com.google.Chrome"],
             muteProcess: true
@@ -4951,12 +4972,12 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
         pipeline.audioConnection?.stateUpdateHandler = nil
         pipeline.audioConnection?.cancel()
         pipeline.audioEncoder?.delegate = nil
+        pipeline.audioPacketSender?.invalidate()
         pipelines[connectionId]?.processAudioCapture = nil
         pipelines[connectionId]?.audioConnection = nil
         pipelines[connectionId]?.audioSessionKey = nil
         pipelines[connectionId]?.audioEncoder = nil
-        pipelines[connectionId]?.audioSendInProgress = false
-        pipelines[connectionId]?.pendingAudioPacket = nil
+        pipelines[connectionId]?.audioPacketSender = nil
         setAudioState(.off, for: connectionId)
         if hadAudioResources {
             LogManager.shared.log("Sender: Audio pipeline stopped without rebuilding display for \(pipeline.service.name)")
@@ -5236,104 +5257,4 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderD
         )
     }
 
-    // AudioEncoderDelegate - Send AAC audio to the specific connection
-    func audioEncoder(_ encoder: AudioEncoder, didEncode data: Data, for connectionId: UUID) {
-        // ProcessAudioTapCapture invokes its handler on a Core Audio queue, while
-        // NetworkClient owns pipeline state on the main queue.
-        guard Thread.isMainThread else {
-            DispatchQueue.main.async { [weak self, weak encoder] in
-                guard let self, let encoder else { return }
-                self.audioEncoder(encoder, didEncode: data, for: connectionId)
-            }
-            return
-        }
-
-        guard let pipeline = pipelines[connectionId],
-              pipeline.audioEncoder === encoder else { return }
-
-        // Background grace: receiver is suspended — don't queue audio either.
-        if pipeline.backgroundGraceStart != nil { return }
-
-        // Legacy receivers (iOS/Mac Swift) don't support audio — skip
-        guard pipeline.supportsTypeByte else { return }
-
-        // Never send media before the auxiliary handshake finishes. Doing so
-        // interleaves AAC frames with the length-prefixed pairing exchange and
-        // corrupts both sides. Audio also never falls back to the main video
-        // transport because protocol v2 assigns each connection one role.
-        guard let audioConnection = pipeline.audioConnection,
-              pipeline.audioSessionKey != nil,
-              pipeline.audioState == .streaming else {
-            return
-        }
-
-        // Audio always uses TCP framing
-        // Format: [4-byte length][1-byte type: 0x02=audio][AAC data]
-        var typedPayload = Data([0x02]) // Audio packet type
-        typedPayload.append(data)
-        var lengthPrefix = UInt32(typedPayload.count).bigEndian
-        var packet = Data(bytes: &lengthPrefix, count: 4)
-        packet.append(typedPayload)
-
-        enqueueAudioPacket(packet, on: audioConnection, for: connectionId)
-    }
-
-    private func enqueueAudioPacket(
-        _ packet: Data,
-        on connection: NWConnection,
-        for connectionId: UUID
-    ) {
-        guard let pipeline = pipelines[connectionId],
-              pipeline.audioConnection === connection,
-              pipeline.audioState == .streaming else { return }
-
-        if pipeline.audioSendInProgress {
-            // AAC-LC packets are independently decodable. Keep only the newest
-            // pending packet so congestion creates a short gap, not seconds of
-            // accumulated playback latency.
-            pipelines[connectionId]?.pendingAudioPacket = packet
-            return
-        }
-
-        pipelines[connectionId]?.audioSendInProgress = true
-        bytesSentWindow += packet.count
-        let serviceName = pipeline.service.name
-        connection.send(content: packet, completion: .contentProcessed { [weak self] error in
-            DispatchQueue.main.async { [weak self] in
-                self?.finishAudioSend(
-                    on: connection,
-                    connectionId: connectionId,
-                    serviceName: serviceName,
-                    error: error
-                )
-            }
-        })
-    }
-
-    private func finishAudioSend(
-        on connection: NWConnection,
-        connectionId: UUID,
-        serviceName: String,
-        error: NWError?
-    ) {
-        guard let pipeline = pipelines[connectionId],
-              pipeline.audioConnection === connection else { return }
-
-        pipelines[connectionId]?.audioSendInProgress = false
-        if let error {
-            pipelines[connectionId]?.pendingAudioPacket = nil
-            LogManager.shared.log("Sender: Audio send error to \(serviceName) (dedicated): \(error)")
-            handleAudioConnectionEnded(
-                connection,
-                connectionId: connectionId,
-                reason: "send error"
-            )
-            return
-        }
-
-        if let pending = pipelines[connectionId]?.pendingAudioPacket {
-            pipelines[connectionId]?.pendingAudioPacket = nil
-            enqueueAudioPacket(pending, on: connection, for: connectionId)
-        }
-    }
 }

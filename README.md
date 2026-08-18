@@ -123,6 +123,12 @@ cd screenbridge
   granted.
 - Shows waiting, connecting, streaming, retry, and failure states.
 - Recovers the audio path when Chrome restarts or its audio processes change.
+- Keeps up to eight AAC packets in a FIFO on its dedicated TCP sender; a full
+  queue drops the oldest waiting packet instead of overwriting every packet
+  that arrives during a send.
+- Starts and resumes playback after five decoded packets (~107 ms at 48 kHz),
+  so an underrun returns to buffering instead of making later packet arrival
+  timing audible.
 
 **Receiver behavior**
 
@@ -145,7 +151,8 @@ cd screenbridge
    messages report screen size, heartbeat, and keyframe requests.
 
 The media/control transport and optional Chrome-audio transport have explicit
-roles under one receiver-created protocol-v2 session. An audio connection
+roles under one receiver-created protocol-v3 session. Version 3 audio packets
+carry sequence, sample time, sample count, codec, and flags. An audio connection
 cannot create or join a stale video session.
 
 ## Network modes
