@@ -12,8 +12,8 @@ final class AudioPlayerIOS: @unchecked Sendable {
     private var playerNode: AVAudioPlayerNode?
     private var audioConverter: AudioConverterRef?
 
-    fileprivate let outputSampleRate: Double = 48000
-    fileprivate let outputChannels: UInt32 = 2
+    fileprivate let outputSampleRate: Double = AudioStreamFormat.sampleRate
+    fileprivate let outputChannels: UInt32 = AudioStreamFormat.channelCount
 
     private var outputFormat: AVAudioFormat?
     private var engineStarted = false
@@ -23,8 +23,14 @@ final class AudioPlayerIOS: @unchecked Sendable {
     private var sequenceTracker = AudioSequenceTracker()
     private var isInterrupted = false
     private let queue = DispatchQueue(label: "com.bettercast.audio-player", qos: .userInteractive)
-    private let queueKey = DispatchSpecificKey<Void>()
+    fileprivate let queueKey = DispatchSpecificKey<Void>()
+    /// Seen by the free converter-input callback for its queue assertion.
+    fileprivate let converterQueue: DispatchQueue
     private var notificationObservers: [NSObjectProtocol] = []
+    /// Earliest allowed engine-start retry. A dead audio session fails every
+    /// attempt, so retrying per packet (~21 ms) just spun syscalls; events that
+    /// can actually fix the session force an immediate retry.
+    private var earliestNextEngineStartAttempt = Date.distantPast
 
     private var jitterBuffer = AudioJitterBufferState()
 
@@ -35,6 +41,7 @@ final class AudioPlayerIOS: @unchecked Sendable {
 
     init() {
         queue.setSpecific(key: queueKey, value: ())
+        converterQueue = queue
         setupEngine()
         observeAudioSession()
     }
@@ -91,6 +98,45 @@ final class AudioPlayerIOS: @unchecked Sendable {
                 self?.handleRouteChange(notification)
             }
         )
+        // mediaserverd crashes invalidate every AVAudioEngine and AudioConverter
+        // without necessarily emitting an interruption or route change. Missing
+        // this left engineStarted == true on dead objects: permanent silence
+        // until the next full reconnect.
+        notificationObservers.append(
+            center.addObserver(
+                forName: AVAudioSession.mediaServicesWereResetNotification,
+                object: AVAudioSession.sharedInstance(),
+                queue: nil
+            ) { [weak self] _ in
+                self?.handleMediaServicesReset()
+            }
+        )
+    }
+
+    private func handleMediaServicesReset() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            // Apple requires apps to recreate audio objects and re-establish
+            // AVAudioSession properties after media services reset:
+            // https://developer.apple.com/documentation/avfaudio/avaudiosession/mediaserviceswereresetnotification
+            LogManager.shared.log("AudioPlayer: Media services were reset — rebuilding engine and converter")
+            self.resetPlaybackQueue()
+            if let converter = self.audioConverter {
+                AudioConverterDispose(converter)
+            }
+            self.audioConverter = nil
+            do {
+                let session = try configureReceiverAudioSession()
+                LogManager.shared.log(
+                    "AudioPlayer: Reconfigured audio session after reset — sampleRate=\(Int(session.sampleRate))Hz"
+                )
+            } catch {
+                LogManager.shared.log("AudioPlayer: Could not reconfigure audio session after reset: \(error)")
+            }
+            self.setupEngine()
+            self.isInterrupted = false
+            self.restartEngine(reason: "media services reset")
+        }
     }
 
     private func handleInterruption(_ notification: Notification) {
@@ -126,10 +172,13 @@ final class AudioPlayerIOS: @unchecked Sendable {
     }
 
     private func resetPlaybackQueue() {
+        // Invalidate old completion callbacks before stop() asks the player to
+        // deliver them. Otherwise callbacks from the previous connection can
+        // decrement the next connection's newly scheduled buffers.
+        jitterBuffer.reset()
         playerNode?.stop()
         audioEngine?.stop()
         engineStarted = false
-        jitterBuffer.reset()
         sequenceTracker.reset()
         currentPacketData = nil
         currentPacketConsumed = false
@@ -139,7 +188,7 @@ final class AudioPlayerIOS: @unchecked Sendable {
         resetPlaybackQueue()
         do {
             try AVAudioSession.sharedInstance().setActive(true)
-            startEngineIfNeeded()
+            startEngineIfNeeded(force: true)
             LogManager.shared.log("AudioPlayer: Recovered after \(reason)")
         } catch {
             LogManager.shared.log("AudioPlayer: Could not reactivate after \(reason): \(error)")
@@ -189,13 +238,15 @@ final class AudioPlayerIOS: @unchecked Sendable {
         )
     }
 
-    private func startEngineIfNeeded() {
+    private func startEngineIfNeeded(force: Bool = false) {
         guard !engineStarted, let engine = audioEngine else { return }
+        if !force, Date() < earliestNextEngineStartAttempt { return }
         do {
             try engine.start()
             engineStarted = true
             LogManager.shared.log("AudioPlayer: Engine started")
         } catch {
+            earliestNextEngineStartAttempt = Date().addingTimeInterval(1.0)
             LogManager.shared.log("AudioPlayer: Engine start failed: \(error)")
         }
     }
@@ -258,10 +309,20 @@ final class AudioPlayerIOS: @unchecked Sendable {
         if status == noErr && outputDataPacketSize > 0 {
             pcmBuffer.frameLength = outputDataPacketSize
             let shouldStartPlayback = jitterBuffer.bufferScheduled()
-            playerNode?.scheduleBuffer(pcmBuffer) { [weak self] in
+            let playbackGeneration = jitterBuffer.playbackGeneration
+            // The default scheduleBuffer completion is `dataConsumed`, which
+            // Apple documents may run before rendering starts. Pending depth
+            // must track rendered audio or it reports false underruns and may
+            // pause a player that still has audio queued.
+            // https://developer.apple.com/documentation/avfaudio/avaudioplayernode/schedulebuffer(_:completioncallbacktype:completionhandler:)
+            playerNode?.scheduleBuffer(
+                pcmBuffer,
+                completionCallbackType: .dataRendered
+            ) { [weak self] callbackType in
+                guard callbackType == .dataRendered else { return }
                 self?.queue.async { [weak self] in
                     guard let self else { return }
-                    if self.jitterBuffer.bufferCompleted() {
+                    if self.jitterBuffer.bufferCompleted(scheduledIn: playbackGeneration) {
                         self.playerNode?.pause()
                         self.underrunCount += 1
                         LogManager.shared.log(
@@ -330,6 +391,12 @@ private func audioPlayerConverterInputCallback(
     }
 
     let player = Unmanaged<AudioPlayerIOS>.fromOpaque(userData).takeUnretainedValue()
+
+    // The input callback runs synchronously inside AudioConverterFillComplexBuffer,
+    // which decodeOnQueue invokes on the player's serial queue. Assert that
+    // contract so a future change that moves decode (or parallelizes the
+    // converter) fails loudly here instead of racing on currentPacketData.
+    dispatchPrecondition(condition: .onQueue(player.converterQueue))
 
     // Only provide data once per decode call
     guard let data = player.currentPacketData, !player.currentPacketConsumed else {

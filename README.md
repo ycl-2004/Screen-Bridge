@@ -95,8 +95,8 @@ cd Screen-Bridge
 - **A link-aware transport.** Auto, Apple peer-to-peer, infrastructure Wi-Fi,
   and wired-style paths can be selected and diagnosed separately.
 - **Recovery without unnecessary rebuilds.** Short iPad backgrounding pauses
-  the stream while preserving the Mac virtual display; unexpected wireless
-  drops use bounded reconnect attempts.
+  the stream and holds the Mac virtual display so windows stay put; unexpected
+  wireless drops use bounded reconnect attempts.
 - **Self-use by default.** Pairing secrets stay in Keychain, and the product
   does not require an account, cloud service, or telemetry pipeline.
 
@@ -154,15 +154,27 @@ cd Screen-Bridge
    messages report screen size, heartbeat, and keyframe requests.
 
 The media/control transport and optional Chrome-audio transport have explicit
-roles under one receiver-created protocol-v3 session. Version 3 audio packets
-carry sequence, sample time, sample count, codec, and flags. An audio connection
-cannot create or join a stale video session.
+roles under one receiver-created session. The wire protocol is version 4:
+audio packets carry sequence, sample time, sample count, codec, and flags, and
+every control message in **both** directions — including the sender's media
+heartbeat and disconnect notice — travels sealed in an authenticated envelope
+(type byte `0x05` on the sender→receiver path) with per-transport replay
+protection and a direction-specific HMAC domain that rejects reflected control
+traffic. Both the Mac and iPad apps must run the same protocol generation;
+a version mismatch fails pairing with an explicit message. See
+`docs/decisions/ADR-008`. An audio connection cannot create or join a stale
+video session.
 
 ## Network modes
 
 Screen Bridge exposes four transport preferences:
 
-- `Auto` lets Network.framework choose among the receiver's available paths.
+- `Auto` first tries Bonjour-backed routes in reliability order (wired,
+  infrastructure Wi-Fi, then AWDL), and uses an unscoped Network.framework
+  attempt only as the final compatibility fallback. The whole chain is bounded
+  by a 35-second budget and spends fewer AWDL warm-up retries than an explicit
+  AWDL request, so a receiver advertising many interfaces cannot stretch one
+  connect into minutes of `Connecting…`.
 - `Require Cable` requires the exact wired interface on which Bonjour observed
   the receiver. It reports failure instead of silently switching to Wi-Fi.
 - `AWDL` requires the receiver's Bonjour result on an `awdl`/`llw` interface.
@@ -170,7 +182,8 @@ Screen Bridge exposes four transport preferences:
   peer-to-peer routing.
 
 The connected-device panel separates the requested route, Network.framework's
-path type, and the concrete Bonjour interface evidence. The iPad listener
+path type, and the concrete Bonjour interface evidence. Auto shows concrete
+evidence when it scoped a discovered candidate. The iPad listener
 prefers TCP port 51820, falls back to a dynamic port only when that port is in
 use, and continues to advertise the actual endpoint through Bonjour. Receiver
 settings can export a bounded diagnostics log with listener, service, path,
@@ -186,9 +199,9 @@ interface, and disconnect events.
   its settings button.
 - Copy and paste on the streamed display use the Mac clipboard, because the
   virtual display belongs to the Mac.
-- Backgrounding the iPad receiver pauses streaming for up to five minutes. A
-  real network failure, force-quit, or manual disconnect ends the session
-  immediately.
+- Backgrounding the iPad receiver pauses streaming for up to five minutes and
+  keeps your windows on the extended display. A force-quit or manual disconnect
+  ends the session immediately.
 
 ## Screenshots
 
@@ -272,9 +285,17 @@ on. Accessibility is not required for the display-only workflow.
 <summary>What happens when the iPad goes into the background?</summary>
 
 Short backgrounding pauses the stream for up to five minutes while preserving
-the Mac virtual display. Returning to the receiver resumes the session with a
-fresh keyframe. Force-quitting, manually disconnecting, or exceeding the grace
-period ends the session.
+the Mac virtual display, so windows stay where you put them instead of being
+bounced back to the Mac's own screen.
+
+iPadOS suspends the receiver and resets its sockets about a second after the
+background notice, so the connection itself cannot be held open. The Mac
+therefore holds the *display* rather than the connection: the virtual display
+outlives its session for the grace window, the Mac keeps trying to reconnect for
+that whole window, and the session that comes back adopts the display that was
+already there. Returning to the receiver resumes with a fresh keyframe.
+Force-quitting, manually disconnecting, or exceeding the grace period retires
+the display and ends the session.
 
 </details>
 
@@ -393,13 +414,49 @@ states and are not the current product release.
 The shared test suite currently covers pairing, Keychain storage, framing,
 AVCC parsing, session roles, reconnect policy, media liveness, bounded video
 delivery, timed audio packets, the sender FIFO, and receiver rebuffering. The
-v1 release run completed `102/102` tests with 0 failures.
+current worktree run completed `129/129` tests with 0 failures.
+
+The 2026-08-19 device check also built, signed, installed, and launched the
+receiver on an iPad Air 5 running iPadOS 15.7. The signed Mac app discovered
+and authenticated that receiver, created a 2688×1868 HiDPI capture at the
+60 FPS / 100 Mbps cable profile, and sent video frames. Auto selected the
+Bonjour-backed `en8` candidate after the former unscoped Auto dial had timed
+out. A local CoreAudio tap probe verified Chrome's Audio Service is exposed as
+`com.google.Chrome.helper` and that the helper-aware capture path receives
+non-zero 48 kHz float PCM. During the real iPad session the dedicated audio TCP
+authenticated, AAC-LC 48 kHz stereo packets grew from silence-sized 6-byte
+frames to 64–317-byte tone frames, and the bounded sender queue reported zero
+drops with 0–7 ms observed queue latency. Physical audibility on the iPad was
+not independently measured in that initial check.
+
+A later 2026-08-19 three-route session exercised cable, infrastructure Wi-Fi,
+and AWDL on the real iPad. Cable and AWDL sustained their 60 FPS / 100 Mbps
+profiles without video decode or render failures; Wi-Fi stayed inside its
+20 Mbps product cap and showed congestion adaptation without decoder failure.
+The Wi-Fi log did expose receiver audio queue depletion despite zero sender
+audio drops and zero sequence gaps. Apple documents the default player-node
+completion as data-consumed rather than data-rendered, so the current worktree
+now retires jitter-buffer entries only after rendering and ignores completions
+from an older playback generation. Shared tests, a strict package build, and an
+unsigned generic iOS build cover this fix; a new installed-build listening/log
+pass is still required before calling the physical symptom resolved.
+
+The 2026-08-19 worktree also removed the Display settings brightness slider.
+It drove `IODisplayConnect`/`AppleBacklightDisplay`, and neither IOKit class is
+present on Apple silicon (verified on an M4, `Mac16,1`: zero matching services),
+so the control silently did nothing — and what it aimed at was the Mac's own
+backlight, not the iPad's.
 
 The following remain outside the current automated evidence boundary:
 
-- Mac-to-iPad real-device discovery, pairing, and extended-display streaming.
-- Real AWDL, router Wi-Fi, and USB/Thunderbolt path behavior.
-- Chrome audio playback and recovery on a real iPad.
+- Post-fix listening and diagnostics on the real iPad, especially sustained
+  router Wi-Fi audio and transitions among cable, Wi-Fi, and AWDL.
+- Backgrounding a real iPad and confirming that windows stay on the extended
+  display while the Mac holds and re-adopts the virtual display
+  (`docs/decisions/ADR-009`).
+- Long-duration Chrome audio recovery after app/process churn, plus
+  physical-link identity beyond what Network.framework's interface evidence
+  can prove.
 - Signed IPA installation and Developer ID/notarized Mac distribution.
 
 ## Known limitations

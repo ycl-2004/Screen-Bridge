@@ -28,13 +28,45 @@ public enum ConnectionRetryPolicy {
     /// we just cancelled before the next dial arrives.
     public static let backoffSeconds: TimeInterval = 1.5
 
+    /// Wall-clock budget for an entire Auto candidate chain.
+    ///
+    /// Auto walks several routes in reliability order and each one may burn a
+    /// full dial timeout plus warm-up retries. Left uncapped that compounds into
+    /// well over a minute of "Connecting…" before anything is reported, which
+    /// reads as a hang rather than as a search. The budget bounds the wait
+    /// regardless of how many interfaces Bonjour happened to advertise.
+    public static let automaticRouteBudgetSeconds: TimeInterval = 35
+
+    /// Warm-up retries allowed on an AWDL route.
+    ///
+    /// A user who explicitly selected AWDL is waiting on that radio and nothing
+    /// else, so it keeps the full warm-up budget. In Auto, AWDL is one candidate
+    /// among several and spending the same budget there delays every remaining
+    /// route behind a link that is usually not the answer.
+    public static func awdlAttemptBudget(isExplicitAWDLRequest: Bool) -> Int {
+        isExplicitAWDLRequest ? maximumAWDLAttempts : 2
+    }
+
+    /// Whether an Auto chain may still advance to another route candidate.
+    public static func hasAutomaticRouteBudgetRemaining(
+        chainStartedAt: Date,
+        now: Date,
+        budget: TimeInterval = automaticRouteBudgetSeconds
+    ) -> Bool {
+        now.timeIntervalSince(chainStartedAt) < budget
+    }
+
     /// Whether a `connect` call may proceed.
     ///
     /// Only a fresh, externally initiated connect competes for the reservation.
     /// A retry is the continuation of an attempt that already holds it, so
     /// rejecting it as a duplicate would strand the chain it belongs to.
-    public static func shouldAcceptConnect(attempt: Int, hasReservation: Bool) -> Bool {
-        if attempt > 1 { return true }
+    public static func shouldAcceptConnect(
+        attempt: Int,
+        fallbackIndex: Int = 0,
+        hasReservation: Bool
+    ) -> Bool {
+        if attempt > 1 || fallbackIndex > 0 { return true }
         return !hasReservation
     }
 

@@ -53,21 +53,47 @@ public struct SenderHello: Codable, Equatable, Sendable {
 }
 
 public struct ReceiverHello: Codable, Equatable, Sendable {
+    /// Protocol version the receiver is actually running. The sender enforces
+    /// equality so an outdated peer fails the handshake with a clear reason
+    /// instead of failing later on framing differences.
+    public let version: UInt8
     public let receiverNonce: Data
     public let receiverProof: Data
     public let sessionID: UUID
     public let capabilities: ReceiverCapabilities?
 
     public init(
+        version: UInt8 = PrivateBetterCastConstants.protocolVersion,
         receiverNonce: Data,
         receiverProof: Data,
         sessionID: UUID,
         capabilities: ReceiverCapabilities? = nil
     ) {
+        self.version = version
         self.receiverNonce = receiverNonce
         self.receiverProof = receiverProof
         self.sessionID = sessionID
         self.capabilities = capabilities
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case receiverNonce
+        case receiverProof
+        case sessionID
+        case capabilities
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Protocol v3 ReceiverHello omitted this field. Decode it as a sentinel
+        // so the sender reaches its explicit unsupportedProtocol branch instead
+        // of reporting an opaque JSON failure before the version check.
+        version = try container.decodeIfPresent(UInt8.self, forKey: .version) ?? 0
+        receiverNonce = try container.decode(Data.self, forKey: .receiverNonce)
+        receiverProof = try container.decode(Data.self, forKey: .receiverProof)
+        sessionID = try container.decode(UUID.self, forKey: .sessionID)
+        capabilities = try container.decodeIfPresent(ReceiverCapabilities.self, forKey: .capabilities)
     }
 }
 
@@ -76,6 +102,20 @@ public struct SenderProof: Codable, Equatable, Sendable {
 
     public init(senderProof: Data) {
         self.senderProof = senderProof
+    }
+}
+
+public enum AuthenticatedEnvelopeDirection: Sendable {
+    case senderToReceiver
+    case receiverToSender
+
+    fileprivate var authenticationDomain: Data {
+        switch self {
+        case .senderToReceiver:
+            return Data("bettercast.control-envelope.sender-to-receiver.v1".utf8)
+        case .receiverToSender:
+            return Data("bettercast.control-envelope.receiver-to-sender.v1".utf8)
+        }
     }
 }
 
@@ -90,16 +130,34 @@ public struct AuthenticatedEnvelope: Codable, Equatable, Sendable {
         self.mac = mac
     }
 
-    public static func seal(sequence: UInt64, payload: Data, sessionKey: Data) -> AuthenticatedEnvelope {
+    public static func seal(
+        sequence: UInt64,
+        payload: Data,
+        sessionKey: Data,
+        direction: AuthenticatedEnvelopeDirection
+    ) -> AuthenticatedEnvelope {
         AuthenticatedEnvelope(
             sequence: sequence,
             payload: payload,
-            mac: PairingAuthenticator.envelopeMAC(sequence: sequence, payload: payload, sessionKey: sessionKey)
+            mac: PairingAuthenticator.envelopeMAC(
+                sequence: sequence,
+                payload: payload,
+                sessionKey: sessionKey,
+                direction: direction
+            )
         )
     }
 
-    public func verifiedPayload(sessionKey: Data) throws -> Data {
-        let expected = PairingAuthenticator.envelopeMAC(sequence: sequence, payload: payload, sessionKey: sessionKey)
+    public func verifiedPayload(
+        sessionKey: Data,
+        direction: AuthenticatedEnvelopeDirection
+    ) throws -> Data {
+        let expected = PairingAuthenticator.envelopeMAC(
+            sequence: sequence,
+            payload: payload,
+            sessionKey: sessionKey,
+            direction: direction
+        )
         guard PairingAuthenticator.constantTimeEquals(mac, expected) else {
             throw PairingAuthError.invalidEnvelope
         }
@@ -207,10 +265,15 @@ public struct PairingAuthenticator {
         constantTimeEquals(proof, senderProof(secret: secret, senderNonce: senderNonce, receiverNonce: receiverNonce))
     }
 
-    public static func envelopeMAC(sequence: UInt64, payload: Data, sessionKey: Data) -> Data {
+    public static func envelopeMAC(
+        sequence: UInt64,
+        payload: Data,
+        sessionKey: Data,
+        direction: AuthenticatedEnvelopeDirection
+    ) -> Data {
         var sequenceBE = sequence.bigEndian
         return hmac(secret: sessionKey, parts: [
-            Data("bettercast.input-envelope.v1".utf8),
+            direction.authenticationDomain,
             Data(bytes: &sequenceBE, count: MemoryLayout<UInt64>.size),
             payload
         ])

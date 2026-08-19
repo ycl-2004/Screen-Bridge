@@ -17,11 +17,12 @@ enum BCConstants {
     /// AAC-LC frame size in samples. Required by the AAC encoder/decoder.
     static let aacFrameSize: UInt32 = 1024
 
-    /// Default audio sample rate (Hz) for AAC encode/decode.
-    static let audioSampleRate: Double = 48_000
+    /// Default audio sample rate (Hz) for AAC encode/decode. Mirrors the shared
+    /// wire-format constant; the receiver decodes at the same value.
+    static let audioSampleRate: Double = AudioStreamFormat.sampleRate
 
     /// Audio channel count for stereo output.
-    static let audioChannels: UInt32 = 2
+    static let audioChannels: UInt32 = AudioStreamFormat.channelCount
 
     /// AAC bitrate in bits per second.
     static let aacBitrate: UInt32 = 128_000

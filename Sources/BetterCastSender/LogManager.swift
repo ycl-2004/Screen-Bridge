@@ -12,36 +12,98 @@ final class LogManager: ObservableObject, @unchecked Sendable {
     /// Streaming failures (display creation, pairing, capture) are exactly the
     /// ones you cannot reproduce on demand, so they get written to disk as they
     /// happen.
-    private let fileHandle: FileHandle? = {
-        let directory = FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/Screen Bridge", isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent("sender.log")
+    ///
+    /// A long-running session writes steadily (audio and send statistics report
+    /// every few seconds), so the file is size-bounded rather than only
+    /// truncated at launch: an app left connected for days would otherwise grow
+    /// without limit. Rotation keeps one previous generation, so the window that
+    /// actually explains a failure survives crossing the cap.
+    private static let directory = FileManager.default
+        .homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/Screen Bridge", isDirectory: true)
+    private static let logURL = directory.appendingPathComponent("sender.log")
+    private static let previousLogURL = directory.appendingPathComponent("sender.log.1")
+    private static let maximumLogBytes = 4 * 1_024 * 1_024
 
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-        guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
-        // Truncate per launch: this is a diagnostic tail, not an audit trail.
-        try? handle.truncate(atOffset: 0)
-        return handle
-    }()
+    /// Only ever touched on `fileQueue`.
+    private var fileHandle: FileHandle?
+    private var bytesWritten = 0
 
     private let fileQueue = DispatchQueue(label: "com.yccast.logmanager.file")
 
+    /// Time-only for the in-app list, which never spans more than one session.
+    private let displayTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+    /// The file can outlive a day of uptime, so its lines carry the date.
+    private let fileTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    private init() {
+        fileQueue.async { [weak self] in
+            self?.openLogFile(truncating: true)
+        }
+    }
+
+    /// Opens (and on launch truncates) the current log file. Must run on `fileQueue`.
+    private func openLogFile(truncating: Bool) {
+        try? FileManager.default.createDirectory(at: Self.directory, withIntermediateDirectories: true)
+        let url = Self.logURL
+
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(
+                atPath: url.path,
+                contents: nil,
+                attributes: [.posixPermissions: 0o600]
+            )
+        }
+        // Tighten files created by older builds that inherited the umask
+        // (typically 0644 — world-readable network topology diagnostics).
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+
+        guard let handle = try? FileHandle(forWritingTo: url) else {
+            fileHandle = nil
+            return
+        }
+        if truncating {
+            try? handle.truncate(atOffset: 0)
+            bytesWritten = 0
+        } else {
+            bytesWritten = Int((try? handle.seekToEnd()) ?? 0)
+        }
+        fileHandle = handle
+    }
+
+    /// Must run on `fileQueue`.
+    private func rotateIfNeeded(adding byteCount: Int) {
+        guard bytesWritten + byteCount > Self.maximumLogBytes else { return }
+        try? fileHandle?.close()
+        fileHandle = nil
+        try? FileManager.default.removeItem(at: Self.previousLogURL)
+        try? FileManager.default.moveItem(at: Self.logURL, to: Self.previousLogURL)
+        openLogFile(truncating: true)
+    }
+
     func log(_ message: String) {
-        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        let line = "[\(timestamp)] \(message)"
+        let now = Date()
+        let displayLine = "[\(displayTimestampFormatter.string(from: now))] \(message)"
+        let fileLine = "[\(fileTimestampFormatter.string(from: now))] \(message)\n"
 
         fileQueue.async { [weak self] in
-            guard let handle = self?.fileHandle,
-                  let data = (line + "\n").data(using: .utf8) else { return }
+            guard let self, let data = fileLine.data(using: .utf8) else { return }
+            self.rotateIfNeeded(adding: data.count)
+            guard let handle = self.fileHandle else { return }
             try? handle.write(contentsOf: data)
+            self.bytesWritten += data.count
         }
 
         DispatchQueue.main.async {
-            self.logs.append(line)
+            self.logs.append(displayLine)
             if self.logs.count > 200 {
                 self.logs.removeFirst()
             }

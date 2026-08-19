@@ -37,7 +37,7 @@ enum ProcessAudioTapCaptureError: LocalizedError {
 final class ProcessAudioTapCapture {
     typealias AudioHandler = (UnsafePointer<AudioBufferList>, AudioStreamBasicDescription, AudioTimeStamp) -> Void
 
-    private let bundleIDPrefixes: [String]
+    private let targetBundleIDs: [String]
     private let muteProcess: Bool
     private let audioHandler: AudioHandler
     private let queue = DispatchQueue(label: "com.bettercast.process-audio-tap", qos: .userInteractive)
@@ -51,8 +51,13 @@ final class ProcessAudioTapCapture {
     private var observedReplacementProcessIDs: Set<AudioObjectID>?
     private var replacementObservationCount = 0
 
-    init(bundleIDPrefixes: [String], muteProcess: Bool, audioHandler: @escaping AudioHandler) {
-        self.bundleIDPrefixes = bundleIDPrefixes
+    /// `bundleIDs` names the browser app families to capture. Chrome sends
+    /// audio through a `.helper` Core Audio process, so each explicit app ID
+    /// also admits its helper and helper descendants. This stays narrower than
+    /// an unrestricted prefix match, which could capture another Chrome
+    /// channel that the caller did not name.
+    init(bundleIDs: [String], muteProcess: Bool, audioHandler: @escaping AudioHandler) {
+        self.targetBundleIDs = bundleIDs
         self.muteProcess = muteProcess
         self.audioHandler = audioHandler
     }
@@ -67,9 +72,9 @@ final class ProcessAudioTapCapture {
             throw ProcessAudioTapCaptureError.unsupportedOS
         }
 
-        let processIDs = try Self.audioProcessIDs(matchingBundleIDPrefixes: bundleIDPrefixes)
+        let processIDs = try Self.audioProcessIDs(matchingBundleIDs: targetBundleIDs)
         guard !processIDs.isEmpty else {
-            throw ProcessAudioTapCaptureError.noMatchingAudioProcess(bundleIDPrefixes)
+            throw ProcessAudioTapCaptureError.noMatchingAudioProcess(targetBundleIDs)
         }
 
         let tapDescription = CATapDescription(stereoMixdownOfProcesses: processIDs)
@@ -136,7 +141,7 @@ final class ProcessAudioTapCapture {
 
         let currentProcessIDs: Set<AudioObjectID>
         do {
-            currentProcessIDs = Set(try Self.audioProcessIDs(matchingBundleIDPrefixes: bundleIDPrefixes))
+            currentProcessIDs = Set(try Self.audioProcessIDs(matchingBundleIDs: targetBundleIDs))
         } catch {
             return false
         }
@@ -216,14 +221,19 @@ final class ProcessAudioTapCapture {
         return format
     }
 
-    private static func audioProcessIDs(matchingBundleIDPrefixes prefixes: [String]) throws -> [AudioObjectID] {
+    private static func audioProcessIDs(matchingBundleIDs bundleIDs: [String]) throws -> [AudioObjectID] {
         let processIDs = try allAudioProcessIDs()
 
         return processIDs.filter { processID in
             guard let bundleID = stringProperty(processID, selector: kAudioProcessPropertyBundleID) else {
                 return false
             }
-            guard prefixes.contains(where: { bundleID.hasPrefix($0) }) else {
+            guard bundleIDs.contains(where: { targetBundleID in
+                let helperBundleID = targetBundleID + ".helper"
+                return bundleID == targetBundleID
+                    || bundleID == helperBundleID
+                    || bundleID.hasPrefix(helperBundleID + ".")
+            }) else {
                 return false
             }
             return true

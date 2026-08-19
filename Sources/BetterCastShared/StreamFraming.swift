@@ -35,6 +35,30 @@ public enum StreamFraming {
     /// Used where video and audio share a connection and the type is not yet known.
     public static var maxMediaFrameBytes: Int { maxVideoFrameBytes }
 
+    /// Type bytes prefixing sender→receiver frames on the media transport.
+    ///
+    /// `0x05` carries sender control (heartbeat, disconnect notice) sealed in
+    /// an `AuthenticatedEnvelope`; the receiver no longer honors the bare
+    /// `0x03`/`0x04` forms, so an on-path attacker cannot forge them.
+    public enum SenderControlTypeByte {
+        public static let video: UInt8 = 0x01
+        public static let audio: UInt8 = 0x02
+        public static let authenticatedControl: UInt8 = 0x05
+        public static let disconnectCommand: UInt8 = 0x03
+        public static let heartbeatCommand: UInt8 = 0x04
+
+        /// Whether a first body byte marks type-byte framing (as opposed to the
+        /// legacy raw-video framing used by older desktop senders).
+        public static func isFramingMarker(_ byte: UInt8) -> Bool {
+            switch byte {
+            case video, audio, disconnectCommand, heartbeatCommand, authenticatedControl:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
     /// Validates a peer-supplied body length against a channel limit.
     public static func validateBodyLength(_ raw: UInt32, limit: Int) throws -> Int {
         guard raw > 0 else { throw StreamFramingError.emptyFrame }
@@ -205,12 +229,13 @@ public enum MediaLivenessEvaluator {
         // the last thing that was sent — not evidence of a stuck decoder. Only
         // treat a stage as stalled while its input is still fresh; the
         // transport heartbeat above already covers a genuinely dead link.
-        if snapshot.lastVideoAccessUnitReceived > snapshot.lastVideoDecoded,
+        if snapshot.hasDecodedFrame,
+           snapshot.lastVideoAccessUnitReceived > snapshot.lastVideoDecoded,
            now.timeIntervalSince(snapshot.lastVideoAccessUnitReceived) <= timeout,
            now.timeIntervalSince(snapshot.lastVideoDecoded) > timeout {
             return .decoderStalled
         }
-        if snapshot.hasDecodedFrame,
+        if snapshot.hasRenderedFrame,
            snapshot.lastVideoDecoded > snapshot.lastVideoRendered,
            now.timeIntervalSince(snapshot.lastVideoDecoded) <= timeout,
            now.timeIntervalSince(snapshot.lastVideoRendered) > timeout {

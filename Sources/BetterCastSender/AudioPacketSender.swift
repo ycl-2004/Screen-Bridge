@@ -93,7 +93,7 @@ final class AudioPacketSender: AudioEncoderDelegate, @unchecked Sendable {
         nextSequence &+= 1
         nextSampleTime = packetSampleTime &+ UInt64(sampleCount)
 
-        var body = Data([0x02])
+        var body = Data([StreamFraming.SenderControlTypeByte.audio])
         body.append(framedAudio)
         guard body.count <= StreamFraming.maxAudioFrameBytes else {
             droppedPackets += 1

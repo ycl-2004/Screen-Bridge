@@ -2,6 +2,16 @@
 import UIKit
 import AVFoundation
 
+@discardableResult
+func configureReceiverAudioSession() throws -> AVAudioSession {
+    let audioSession = AVAudioSession.sharedInstance()
+    try audioSession.setCategory(.playback, mode: .moviePlayback)
+    try audioSession.setPreferredSampleRate(BCConstants.preferredAudioSampleRate)
+    try audioSession.setPreferredIOBufferDuration(BCConstants.audioIOBufferDuration)
+    try audioSession.setActive(true)
+    return audioSession
+}
+
 // @UIApplicationMain removed -> handled in main.swift
 class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
@@ -13,11 +23,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // read afterwards per Apple QA1631:
         // https://developer.apple.com/library/archive/qa/qa1631/_index.html
         do {
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .moviePlayback)
-            try audioSession.setPreferredSampleRate(BCConstants.preferredAudioSampleRate)
-            try audioSession.setPreferredIOBufferDuration(BCConstants.audioIOBufferDuration)
-            try audioSession.setActive(true)
+            let audioSession = try configureReceiverAudioSession()
             let actualIOBufferMilliseconds = String(
                 format: "%.2f",
                 audioSession.ioBufferDuration * 1_000

@@ -2,8 +2,46 @@ import XCTest
 @testable import BetterCastShared
 
 final class PairingAuthenticatorTests: XCTestCase {
-    func testProtocolVersionIncludesTimedAudioPackets() {
-        XCTAssertEqual(PrivateBetterCastConstants.protocolVersion, 3)
+    func testProtocolVersionSealsSenderControl() {
+        // v4: sender→receiver control travels as authenticated envelopes under
+        // type byte 0x05, and ReceiverHello carries its own version field.
+        XCTAssertEqual(PrivateBetterCastConstants.protocolVersion, 4)
+        XCTAssertEqual(StreamFraming.SenderControlTypeByte.authenticatedControl, 0x05)
+        XCTAssertEqual(StreamFraming.SenderControlTypeByte.disconnectCommand, 0x03)
+        XCTAssertEqual(StreamFraming.SenderControlTypeByte.heartbeatCommand, 0x04)
+        XCTAssertTrue(StreamFraming.SenderControlTypeByte.isFramingMarker(0x05))
+        XCTAssertFalse(StreamFraming.SenderControlTypeByte.isFramingMarker(0x7B))
+    }
+
+    func testReceiverHelloDefaultsToCurrentProtocolVersion() throws {
+        let hello = ReceiverHello(
+            receiverNonce: Data("receiver".utf8),
+            receiverProof: Data(repeating: 1, count: 32),
+            sessionID: UUID()
+        )
+
+        let decoded = try JSONDecoder().decode(
+            ReceiverHello.self,
+            from: JSONEncoder().encode(hello)
+        )
+
+        XCTAssertEqual(decoded.version, PrivateBetterCastConstants.protocolVersion)
+        XCTAssertEqual(decoded, hello)
+    }
+
+    func testLegacyReceiverHelloWithoutVersionDecodesAsUnsupportedSentinel() throws {
+        let json = """
+        {
+          "receiverNonce": "cmVjZWl2ZXI=",
+          "receiverProof": "cHJvb2Y=",
+          "sessionID": "00000000-0000-0000-0000-000000000001"
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(ReceiverHello.self, from: Data(json.utf8))
+
+        XCTAssertEqual(decoded.version, 0)
+        XCTAssertNotEqual(decoded.version, PrivateBetterCastConstants.protocolVersion)
     }
 
     func testMediaHelloStartsWithoutSessionAndRoundTrips() throws {
@@ -147,19 +185,31 @@ final class PairingAuthenticatorTests: XCTestCase {
     func testAuthenticatedEnvelopeVerifiesWithCorrectSessionKey() throws {
         let sessionKey = Data("session-key".utf8)
         let payload = Data("payload".utf8)
-        let envelope = AuthenticatedEnvelope.seal(sequence: 1, payload: payload, sessionKey: sessionKey)
+        let envelope = AuthenticatedEnvelope.seal(
+            sequence: 1,
+            payload: payload,
+            sessionKey: sessionKey,
+            direction: .receiverToSender
+        )
 
-        XCTAssertEqual(try envelope.verifiedPayload(sessionKey: sessionKey), payload)
+        XCTAssertEqual(
+            try envelope.verifiedPayload(sessionKey: sessionKey, direction: .receiverToSender),
+            payload
+        )
     }
 
     func testAuthenticatedEnvelopeFailsWithWrongKey() {
         let envelope = AuthenticatedEnvelope.seal(
             sequence: 1,
             payload: Data("payload".utf8),
-            sessionKey: Data("session-key".utf8)
+            sessionKey: Data("session-key".utf8),
+            direction: .receiverToSender
         )
 
-        XCTAssertThrowsError(try envelope.verifiedPayload(sessionKey: Data("wrong-key".utf8)))
+        XCTAssertThrowsError(try envelope.verifiedPayload(
+            sessionKey: Data("wrong-key".utf8),
+            direction: .receiverToSender
+        ))
     }
 
     func testAuthenticatedEnvelopeFailsAfterPayloadTampering() {
@@ -167,7 +217,8 @@ final class PairingAuthenticatorTests: XCTestCase {
         let envelope = AuthenticatedEnvelope.seal(
             sequence: 1,
             payload: Data("payload".utf8),
-            sessionKey: sessionKey
+            sessionKey: sessionKey,
+            direction: .receiverToSender
         )
         let tampered = AuthenticatedEnvelope(
             sequence: envelope.sequence,
@@ -175,7 +226,10 @@ final class PairingAuthenticatorTests: XCTestCase {
             mac: envelope.mac
         )
 
-        XCTAssertThrowsError(try tampered.verifiedPayload(sessionKey: sessionKey))
+        XCTAssertThrowsError(try tampered.verifiedPayload(
+            sessionKey: sessionKey,
+            direction: .receiverToSender
+        ))
     }
 
     func testAuthenticatedEnvelopeFailsAfterSequenceTampering() {
@@ -183,7 +237,8 @@ final class PairingAuthenticatorTests: XCTestCase {
         let envelope = AuthenticatedEnvelope.seal(
             sequence: 1,
             payload: Data("payload".utf8),
-            sessionKey: sessionKey
+            sessionKey: sessionKey,
+            direction: .receiverToSender
         )
         let tampered = AuthenticatedEnvelope(
             sequence: 2,
@@ -191,6 +246,24 @@ final class PairingAuthenticatorTests: XCTestCase {
             mac: envelope.mac
         )
 
-        XCTAssertThrowsError(try tampered.verifiedPayload(sessionKey: sessionKey))
+        XCTAssertThrowsError(try tampered.verifiedPayload(
+            sessionKey: sessionKey,
+            direction: .receiverToSender
+        ))
+    }
+
+    func testAuthenticatedEnvelopeCannotBeReflectedAcrossDirections() {
+        let sessionKey = Data("session-key".utf8)
+        let envelope = AuthenticatedEnvelope.seal(
+            sequence: 7,
+            payload: Data([StreamFraming.SenderControlTypeByte.heartbeatCommand]),
+            sessionKey: sessionKey,
+            direction: .receiverToSender
+        )
+
+        XCTAssertThrowsError(try envelope.verifiedPayload(
+            sessionKey: sessionKey,
+            direction: .senderToReceiver
+        ))
     }
 }

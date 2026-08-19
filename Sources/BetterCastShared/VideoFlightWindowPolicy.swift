@@ -27,3 +27,18 @@ public enum VideoFlightWindowPolicy {
         (isP2P || isWiredCable) ? reliableLinkWindow : sharedLinkWindow
     }
 }
+
+/// Converts the sender's compressed-video byte window into an observed rate.
+/// Timer callbacks are not guaranteed to arrive exactly one second apart, so
+/// the real elapsed interval is part of the measurement.
+public enum VideoTransferRatePolicy {
+    public static func megabitsPerSecond(
+        byteCount: Int,
+        elapsedSeconds: TimeInterval
+    ) -> Double {
+        guard byteCount >= 0,
+              elapsedSeconds.isFinite,
+              elapsedSeconds > 0 else { return 0 }
+        return (Double(byteCount) * 8) / elapsedSeconds / 1_000_000
+    }
+}

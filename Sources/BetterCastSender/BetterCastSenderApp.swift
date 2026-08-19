@@ -3,7 +3,6 @@ import SwiftUI
 @preconcurrency import Dispatch
 import Security
 import ScreenCaptureKit
-import IOKit.graphics
 import BetterCastShared
 
 
@@ -725,14 +724,10 @@ struct SidebarView: View {
                     }
                 } else {
                     ForEach(client.foundServices.filter { service in
-                        let serviceKey = canonicalDeviceName(service.name)
                         // Hide " P2P" entry when base device exists (merged into one entry)
                         let isP2PDuplicate = service.name.hasSuffix(" P2P")
-                            && client.foundServices.contains(where: { canonicalDeviceName($0.name) == serviceKey && $0.name != service.name })
-                        let duplicateDiscovered = client.foundServices.contains(where: {
-                            canonicalDeviceName($0.name) == serviceKey && $0.name < service.name
-                        })
-                        return !isP2PDuplicate && !duplicateDiscovered
+                            && client.foundServices.contains(where: { canonicalDeviceName($0.name) == canonicalDeviceName(service.name) && $0.name != service.name })
+                        return !isP2PDuplicate && !isRedundantRenamedVariant(service, among: client.foundServices)
                     }, id: \.name) { service in
                         SidebarDeviceRow(service: service, client: client, selection: $selection)
                     }
@@ -744,10 +739,7 @@ struct SidebarView: View {
                     // Hide " P2P" connected entry when base device is also connected
                     let isP2PConnected = display.name.hasSuffix(" P2P")
                         && client.connectedDisplays.contains(where: { canonicalDeviceName($0.name) == displayKey && $0.name != display.name })
-                    let duplicateConnected = client.connectedDisplays.contains(where: {
-                        canonicalDeviceName($0.name) == displayKey && $0.name < display.name
-                    })
-                    return !inFoundServices && !isP2PConnected && !duplicateConnected
+                    return !inFoundServices && !isP2PConnected
                 }) { display in
                     sidebarRow(display.name, subtitle: display.resolution, icon: "display", tag: .device(display.id), iconTint: .green)
                 }
@@ -985,10 +977,7 @@ struct DetailPanelView: View {
         client.foundServices.filter { service in
             let serviceKey = canonicalDeviceName(service.name)
             let isConnected = client.connectedServices.contains(where: { canonicalDeviceName($0.name) == serviceKey })
-            let isDuplicate = client.foundServices.contains(where: {
-                canonicalDeviceName($0.name) == serviceKey && $0.name < service.name
-            })
-            return !isConnected && !isDuplicate
+            return !isConnected && !isRedundantRenamedVariant(service, among: client.foundServices)
         }
     }
 
@@ -1063,13 +1052,6 @@ struct DetailPanelView: View {
                     Toggle("Retina (HiDPI)", isOn: $client.isRetina)
                         .disabled(!client.useVirtualDisplay || client.selectedResolution == VirtualDisplayManager.receiverBestFitResolution)
                     InfoTip(text: "Uses HiDPI for sharper text. Best Fit already includes it.")
-                }
-
-                HStack {
-                    Slider(value: $client.displayBrightness, in: 0...1, step: 0.05) {
-                        Text("Brightness")
-                    }
-                    InfoTip(text: "Adjusts hardware brightness when the display supports it.")
                 }
 
                 HStack {
@@ -1177,10 +1159,13 @@ struct DetailPanelView: View {
                 }
 
                 if client.isConnected {
-                    LabeledContent("Transfer Speed") {
-                        Text(client.transferRate)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(.green)
+                    HStack {
+                        LabeledContent("Video Throughput") {
+                            Text(client.transferRate)
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(.green)
+                        }
+                        InfoTip(text: "Compressed video admitted to the network send window across connected displays. This is not the link's rated speed; higher quality and motion raise it.")
                     }
                 }
             }
@@ -1651,7 +1636,7 @@ struct DisplayOverviewView: View {
                 if !client.connectedDisplays.isEmpty {
                     DashboardCard {
                         HStack {
-                            Text("Transfer Speed")
+                            Text("Video Throughput")
                                 .font(.system(size: 13))
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -1948,7 +1933,7 @@ struct DeviceDetailView: View {
                     .foregroundStyle(display.hasVerifiedRouteEvidence ? .green : .secondary)
                 }
 
-                LabeledContent("Transfer Speed") {
+                LabeledContent("Video Throughput") {
                     Text(client.transferRate)
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.green)
@@ -2062,40 +2047,6 @@ struct DiscoveredDeviceView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(service.name)
-    }
-}
-
-// MARK: - Display Brightness Control
-
-enum DisplayBrightnessControl {
-    static func setBrightness(_ brightness: Double) {
-        let value = max(0, min(1, brightness))
-        var iterator: io_iterator_t = 0
-        let result = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"), &iterator)
-        guard result == kIOReturnSuccess else { return }
-        defer { IOObjectRelease(iterator) }
-
-        var service = IOIteratorNext(iterator)
-        while service != 0 {
-            IODisplaySetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, Float(value))
-            IOObjectRelease(service)
-            service = IOIteratorNext(iterator)
-        }
-    }
-
-    static func getBrightness() -> Double {
-        var iterator: io_iterator_t = 0
-        let result = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"), &iterator)
-        guard result == kIOReturnSuccess else { return 0.5 }
-        defer { IOObjectRelease(iterator) }
-
-        var brightness: Float = 0.5
-        let service = IOIteratorNext(iterator)
-        if service != 0 {
-            IODisplayGetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, &brightness)
-            IOObjectRelease(service)
-        }
-        return Double(brightness)
     }
 }
 
@@ -2224,6 +2175,22 @@ struct DiscoveredService: Identifiable {
         }
     }
 
+    /// Ordered route candidates for Auto mode.
+    ///
+    /// Leaving a multi-interface Bonjour endpoint completely unscoped can make
+    /// Network.framework spend the whole dial timeout on an unreachable Wi-Fi
+    /// address even though the same result carries working cable evidence. Try
+    /// concrete discovered routes first, fastest/most stable first, and retain
+    /// an unscoped system-selected attempt as the final compatibility fallback.
+    func automaticRouteCandidates() -> [NetworkInterfacePreference] {
+        var candidates: [NetworkInterfacePreference] = []
+        if requiredInterface(for: .requireCable) != nil { candidates.append(.requireCable) }
+        if requiredInterface(for: .wifi) != nil { candidates.append(.wifi) }
+        if requiredInterface(for: .awdl) != nil { candidates.append(.awdl) }
+        candidates.append(.auto)
+        return candidates
+    }
+
     func isVisible(in preference: NetworkInterfacePreference) -> Bool {
         preference == .auto || requiredInterface(for: preference) != nil
     }
@@ -2259,6 +2226,24 @@ private func canonicalDeviceName(_ name: String) -> String {
     }
 
     return result
+}
+
+/// Whether a discovered entry is a renamed variant (e.g. " P2P" or " (2)") of
+/// another entry whose canonical name is also present.
+///
+/// An entry whose own name IS the canonical form is never redundant. Hiding it
+/// on a lexicographic comparison let any LAN device that advertised the same
+/// canonical name with a "smaller" full name silently replace the real device
+/// in the picker; a same-name peer must stay visible (the pairing handshake
+/// remains the actual gate).
+private func isRedundantRenamedVariant(_ service: DiscoveredService, among services: [DiscoveredService]) -> Bool {
+    let key = canonicalDeviceName(service.name)
+    guard service.name != key else { return false }
+    return services.contains { candidate in
+        candidate.name != service.name
+            && canonicalDeviceName(candidate.name) == key
+            && candidate.name == key
+    }
 }
 
 enum StreamQuality: Int, CaseIterable, Identifiable {
@@ -2357,6 +2342,11 @@ struct ConnectionPipeline {
     var audioConnection: NWConnection?
     var audioSessionKey: Data?
     var virtualDisplayManager: VirtualDisplayManager?
+    /// Geometry and ID of the display `virtualDisplayManager` currently owns.
+    /// Recorded so a background hold can be handed to the next session for this
+    /// device and matched against what that session asks for.
+    var virtualDisplayResolution: VirtualDisplayManager.Resolution?
+    var virtualDisplayID: CGDirectDisplayID?
     var screenRecorder: ScreenRecorder?
     var videoEncoder: VideoEncoder?
     var audioEncoder: AudioEncoder?
@@ -2400,6 +2390,14 @@ struct ConnectionPipeline {
     var reportedScreenWidth: Int? = nil
     var reportedScreenHeight: Int? = nil
     var lastInputSequence: UInt64 = 0
+    /// Monotonic outbound sequence for sender→receiver control envelopes.
+    var outputSequence: UInt64 = 0
+    /// Replay protection for envelopes arriving on the auxiliary audio
+    /// transport; independent of the media transport's `lastInputSequence`.
+    var audioInputSequence: UInt64 = 0
+    /// Pending (debounced) pipeline rebuild requested by a screen-info update.
+    var screenInfoRebuildWork: DispatchWorkItem?
+    var lastChromeTapAttempt: Date = .distantPast
     // Background grace: set when the receiver announces it is backgrounding
     // (command 555). While set, the sender pauses video/audio sends, keeps the
     // virtual display and connection alive, and replaces the 15s heartbeat
@@ -2485,6 +2483,20 @@ private final class ConnectionAttemptState: @unchecked Sendable {
     var isSettled = false
 }
 
+/// A virtual display that outlived the connection that created it, waiting for
+/// the same receiver to come back from the background.
+struct HeldVirtualDisplay {
+    let manager: VirtualDisplayManager
+    let displayID: CGDirectDisplayID
+    /// The exact geometry the display was created with. A returning receiver
+    /// that now wants a different size (rotation, a resolution change while it
+    /// was away) cannot reuse it, so the hold is discarded instead.
+    let resolution: VirtualDisplayManager.Resolution
+    let serviceName: String
+    let deadline: Date
+    var expiryWork: DispatchWorkItem?
+}
+
 /// Single source of truth for the sender's connection lifecycle.
 /// `status` (free text) is derived alongside it for display.
 enum ConnectionPhase: String, Equatable {
@@ -2512,6 +2524,21 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     /// pipeline. Keeping them explicit makes pairing reset a true revocation
     /// barrier, including late handshake completions.
     private var pendingConnections: [UUID: NWConnection] = [:]
+    /// Virtual displays kept alive across a receiver's background gap, keyed by
+    /// device.
+    ///
+    /// iPadOS resets the receiver's sockets within a second of suspending it, so
+    /// the background notice (command 555) is always followed by a fatal
+    /// transport error. Destroying the virtual display there bounced every
+    /// window back to the Mac's own screen — the exact thing the grace period
+    /// exists to prevent. The display therefore outlives its connection until
+    /// the grace deadline, and the next authenticated session for the same
+    /// device adopts it.
+    ///
+    /// Adoption is mandatory rather than an optimization: WindowServer publishes
+    /// at most one of these private displays at a time, so creating a second one
+    /// while a held display is alive yields a display that never goes online.
+    private var heldVirtualDisplays: [String: HeldVirtualDisplay] = [:]
     private let pairingSecretStore: PairingSecretStoring = KeychainPairingSecretStore()
 
     @Published var status: String = "Idle"
@@ -2549,9 +2576,6 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             }
         }
     }
-    @Published var displayBrightness: Float = Float(DisplayBrightnessControl.getBrightness()) {
-        didSet { DisplayBrightnessControl.setBrightness(Double(displayBrightness)) }
-    }
     @Published var connectedDisplays: [ConnectedDisplayInfo] = [] // Per-device display info
 
 
@@ -2559,6 +2583,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     @Published var transferRate: String = "0 Mbps"
     private var bytesSentWindow: Int = 0
     private var lastStatsTime: Date = Date()
+    private var statsTimer: Timer?
     
     // Settings
     @Published var selectedResolution: VirtualDisplayManager.Resolution = VirtualDisplayManager.receiverBestFitResolution {
@@ -3010,6 +3035,9 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             LogManager.shared.log("Pairing: Revoking \(pipelines.count) active session(s)")
             disconnect()
         }
+        // Held displays outlive their connection, so revocation has to reach
+        // them even when no pipeline is left to disconnect.
+        releaseAllHeldVirtualDisplays(reason: "pairing was reset")
         if !pendingConnections.isEmpty {
             LogManager.shared.log("Pairing: Cancelling \(pendingConnections.count) pending connection(s)")
             let pending = pendingConnections.values
@@ -3149,6 +3177,13 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             self?.receiveCodable(ReceiverHello.self, on: connection) { [weak self] receiverResult in
                 switch receiverResult {
                 case .success(let receiverHello):
+                    // Both directions of the handshake now carry a version; an
+                    // outdated receiver fails here with a clear reason instead
+                    // of failing later on framing differences.
+                    guard receiverHello.version == PrivateBetterCastConstants.protocolVersion else {
+                        finish(.failure(PairingTransportError.unsupportedProtocol))
+                        return
+                    }
                     if role == .audio && receiverHello.sessionID != receiverSessionID {
                         finish(.failure(PairingTransportError.invalidSession))
                         return
@@ -3277,6 +3312,26 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         if count == 1 {
             startHeartbeatMonitor()
             startStatsTimer()
+        }
+
+        // The dial-up handler installed by connect() only managed the pending
+        // connection. Once the pipeline is live, a transport-level failure must
+        // tear the pipeline down promptly instead of leaving the UI on
+        // "Connected" with a dead virtual display until the heartbeat timeout.
+        connection.stateUpdateHandler = { [weak self] state in
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.pipelines[connectionId]?.connection === connection else { return }
+                switch state {
+                case .failed(let error):
+                    LogManager.shared.log("Sender: Stream connection to \(service.name) failed: \(error)")
+                    self.removeConnection(connectionId, attemptReconnect: true, reason: "connection failed: \(error.localizedDescription)")
+                case .cancelled:
+                    self.removeConnection(connectionId, attemptReconnect: false, reason: "connection cancelled")
+                default:
+                    break
+                }
+            }
         }
 
         receive(on: connection, connectionId: connectionId)
@@ -3461,6 +3516,9 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                                     return
                                 }
                                 self.pipelines[connectionId]?.audioSessionKey = authentication.sessionKey
+                                // Fresh transport, fresh nonce, fresh session key:
+                                // start its replay window from zero.
+                                self.pipelines[connectionId]?.audioInputSequence = 0
                                 let packetSender = AudioPacketSender(
                                     connection: audioConnection,
                                     connectionId: connectionId,
@@ -3631,7 +3689,6 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     /// AWDL can need several cold-start dials while its radio wakes. Cable and
     /// infrastructure modes get one dial because retrying cannot create a
     /// missing interface/address.
-    private static let maximumAWDLConnectAttempts = ConnectionRetryPolicy.maximumAWDLAttempts
     private static let connectRetryBackoff: TimeInterval = ConnectionRetryPolicy.backoffSeconds
     private static let connectTimeout: TimeInterval = 10.0
 
@@ -3683,7 +3740,105 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         }
     }
 
-    func connect(to service: DiscoveredService, attempt: Int = 1) {
+    /// Continue a dial chain without releasing its per-device reservation.
+    /// AWDL gets warm-up retries on the same route; Auto advances through the
+    /// concrete interfaces advertised by the Bonjour result before giving up.
+    @discardableResult
+    private func scheduleConnectionRetry(
+        to service: DiscoveredService,
+        serviceKey: String,
+        requestedPreference: NetworkInterfacePreference,
+        effectivePreference: NetworkInterfacePreference,
+        attempt: Int,
+        autoCandidateIndex: Int,
+        autoCandidateCount: Int,
+        chainStartedAt: Date,
+        failureDescription: String
+    ) -> Bool {
+        let nextAttempt: Int
+        let nextAutoCandidateIndex: Int
+        let retryDescription: String
+
+        let awdlBudget = ConnectionRetryPolicy.awdlAttemptBudget(
+            isExplicitAWDLRequest: requestedPreference == .awdl
+        )
+        // Auto only keeps searching while its overall budget holds, so a device
+        // advertising many interfaces cannot stretch one connect into minutes.
+        let hasAutoBudget = ConnectionRetryPolicy.hasAutomaticRouteBudgetRemaining(
+            chainStartedAt: chainStartedAt,
+            now: Date()
+        )
+
+        if effectivePreference == .awdl,
+           attempt < awdlBudget,
+           requestedPreference != .auto || hasAutoBudget {
+            nextAttempt = attempt + 1
+            nextAutoCandidateIndex = autoCandidateIndex
+            retryDescription = "AWDL is waking — retrying \(service.name) (\(nextAttempt)/\(awdlBudget))..."
+        } else if requestedPreference == .auto,
+                  autoCandidateIndex + 1 < autoCandidateCount,
+                  hasAutoBudget {
+            nextAttempt = 1
+            nextAutoCandidateIndex = autoCandidateIndex + 1
+            retryDescription = "Auto is trying another route to \(service.name) (\(nextAutoCandidateIndex + 1)/\(autoCandidateCount))..."
+        } else {
+            if requestedPreference == .auto && !hasAutoBudget {
+                LogManager.shared.log(
+                    "Sender: Auto gave up on \(service.name) after "
+                        + "\(Int(ConnectionRetryPolicy.automaticRouteBudgetSeconds))s across "
+                        + "\(autoCandidateIndex + 1)/\(autoCandidateCount) route candidate(s)"
+                )
+            }
+            return false
+        }
+
+        setPhase(.connecting, retryDescription)
+        if requestedPreference == .auto {
+            LogManager.shared.log(
+                "Sender: \(failureDescription); retrying Auto route candidate "
+                    + "\(nextAutoCandidateIndex + 1)/\(autoCandidateCount)"
+            )
+        } else {
+            LogManager.shared.log(
+                "Sender: \(failureDescription); retrying AWDL attempt \(nextAttempt)/\(awdlBudget)"
+            )
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectRetryBackoff) { [weak self] in
+            guard let self, self.interfacePreference == requestedPreference else { return }
+            let alreadyConnected = self.pipelines.values.contains {
+                self.deviceKey(for: $0.service.name) == serviceKey
+            }
+            switch ConnectionRetryPolicy.backoffOutcome(
+                hasReservation: self.connectingServiceNames.contains(serviceKey),
+                deviceAlreadyConnected: alreadyConnected
+            ) {
+            case .abandonSuperseded:
+                return
+            case .releaseReservation:
+                self.connectingServiceNames.remove(serviceKey)
+            case .proceedWithRetry:
+                self.connect(
+                    to: service,
+                    attempt: nextAttempt,
+                    autoCandidateIndex: nextAutoCandidateIndex,
+                    chainStartedAt: chainStartedAt
+                )
+            }
+        }
+        return true
+    }
+
+    func connect(
+        to service: DiscoveredService,
+        attempt: Int = 1,
+        autoCandidateIndex: Int = 0,
+        // Start of the dial chain this call belongs to. Auto measures its
+        // overall budget from here, so a retry inherits it instead of resetting
+        // the clock on every candidate.
+        chainStartedAt: Date? = nil
+    ) {
+        let chainStart = chainStartedAt ?? Date()
         let serviceKey = deviceKey(for: service.name)
         if connectedServices.contains(where: { deviceKey(for: $0.name) == serviceKey }) {
             LogManager.shared.log("Sender: Already connected to \(service.name)")
@@ -3691,6 +3846,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         }
         guard ConnectionRetryPolicy.shouldAcceptConnect(
             attempt: attempt,
+            fallbackIndex: autoCandidateIndex,
             hasReservation: connectingServiceNames.contains(serviceKey)
         ) else {
             LogManager.shared.log("Sender: Already connecting to \(service.name) — ignoring duplicate")
@@ -3698,7 +3854,21 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         }
 
         let requestedPreference = interfacePreference
-        guard let plan = planConnection(to: service, preference: requestedPreference) else {
+        let autoCandidates = service.automaticRouteCandidates()
+        let effectivePreference: NetworkInterfacePreference
+        if requestedPreference == .auto {
+            guard autoCandidates.indices.contains(autoCandidateIndex) else {
+                connectingServiceNames.remove(serviceKey)
+                setPhase(.failed, "Auto exhausted every discovered route to \(service.name)")
+                LogManager.shared.log("Sender: Auto route candidate index was out of bounds for \(service.name)")
+                return
+            }
+            effectivePreference = autoCandidates[autoCandidateIndex]
+        } else {
+            effectivePreference = requestedPreference
+        }
+
+        guard let plan = planConnection(to: service, preference: effectivePreference) else {
             connectingServiceNames.remove(serviceKey)
             setPhase(
                 .failed,
@@ -3719,12 +3889,23 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         )
 
         if let requiredInterface = plan.requiredInterface {
-            LogManager.shared.log(
-                "Sender: Requiring \(requestedPreference.label) interface "
-                    + "\(requiredInterface.name)[\(requiredInterface.type)] for \(service.name)"
-            )
+            if requestedPreference == .auto {
+                LogManager.shared.log(
+                    "Sender: Auto route candidate \(autoCandidateIndex + 1)/\(autoCandidates.count) "
+                        + "requires \(effectivePreference.label) interface "
+                        + "\(requiredInterface.name)[\(requiredInterface.type)] for \(service.name)"
+                )
+            } else {
+                LogManager.shared.log(
+                    "Sender: Requiring \(requestedPreference.label) interface "
+                        + "\(requiredInterface.name)[\(requiredInterface.type)] for \(service.name)"
+                )
+            }
         } else {
-            LogManager.shared.log("Sender: Auto route for \(service.name); system may choose any discovered path")
+            LogManager.shared.log(
+                "Sender: Auto route candidate \(autoCandidateIndex + 1)/\(autoCandidates.count) for "
+                    + "\(service.name) is system-selected"
+            )
         }
 
         let connection = NWConnection(to: service.endpoint, using: plan.parameters)
@@ -3739,33 +3920,17 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             connection.stateUpdateHandler = nil
             connection.cancel()
 
-            if requestedPreference == .awdl && attempt < Self.maximumAWDLConnectAttempts {
-                let nextAttempt = attempt + 1
-                self.setPhase(
-                    .connecting,
-                    "AWDL is waking — retrying \(service.name) (\(nextAttempt)/\(Self.maximumAWDLConnectAttempts))..."
-                )
-                LogManager.shared.log(
-                    "Sender: AWDL timed out for \(service.name); retrying "
-                        + "\(nextAttempt)/\(Self.maximumAWDLConnectAttempts)"
-                )
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectRetryBackoff) { [weak self] in
-                    guard let self else { return }
-                    let alreadyConnected = self.pipelines.values.contains {
-                        self.deviceKey(for: $0.service.name) == serviceKey
-                    }
-                    switch ConnectionRetryPolicy.backoffOutcome(
-                        hasReservation: self.connectingServiceNames.contains(serviceKey),
-                        deviceAlreadyConnected: alreadyConnected
-                    ) {
-                    case .abandonSuperseded:
-                        return
-                    case .releaseReservation:
-                        self.connectingServiceNames.remove(serviceKey)
-                    case .proceedWithRetry:
-                        self.connect(to: service, attempt: nextAttempt)
-                    }
-                }
+            if self.scheduleConnectionRetry(
+                to: service,
+                serviceKey: serviceKey,
+                requestedPreference: requestedPreference,
+                effectivePreference: effectivePreference,
+                attempt: attempt,
+                autoCandidateIndex: autoCandidateIndex,
+                autoCandidateCount: autoCandidates.count,
+                chainStartedAt: chainStart,
+                failureDescription: "\(effectivePreference.label) timed out for \(service.name)"
+            ) {
                 return
             }
 
@@ -3774,10 +3939,17 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                 .failed,
                 "\(requestedPreference.label) could not reach \(service.name)"
             )
-            LogManager.shared.log(
-                "Sender: \(requestedPreference.label) connection to \(service.name) timed out; "
-                    + "strict modes do not fall back to another interface"
-            )
+            if requestedPreference == .auto {
+                LogManager.shared.log(
+                    "Sender: Auto connection to \(service.name) timed out after exhausting "
+                        + "\(autoCandidates.count) route candidate(s)"
+                )
+            } else {
+                LogManager.shared.log(
+                    "Sender: \(requestedPreference.label) connection to \(service.name) timed out; "
+                        + "strict mode did not fall back to another interface"
+                )
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectTimeout, execute: timeoutWork)
 
@@ -3803,8 +3975,24 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
 
                 case .failed(let error):
                     timeoutWork.cancel()
-                    self.connectingServiceNames.remove(serviceKey)
+                    attemptState.isSettled = true
                     self.pendingConnections.removeValue(forKey: connectionId)
+                    connection.stateUpdateHandler = nil
+                    connection.cancel()
+                    if self.scheduleConnectionRetry(
+                        to: service,
+                        serviceKey: serviceKey,
+                        requestedPreference: requestedPreference,
+                        effectivePreference: effectivePreference,
+                        attempt: attempt,
+                        autoCandidateIndex: autoCandidateIndex,
+                        autoCandidateCount: autoCandidates.count,
+                        chainStartedAt: chainStart,
+                        failureDescription: "\(effectivePreference.label) failed for \(service.name): \(error.localizedDescription)"
+                    ) {
+                        return
+                    }
+                    self.connectingServiceNames.remove(serviceKey)
                     self.setPhase(.failed, "\(requestedPreference.label) connection failed")
                     LogManager.shared.log(
                         "Sender: \(requestedPreference.label) connection to \(service.name) failed: \(error)"
@@ -3972,7 +4160,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     
     // How long a backgrounded receiver may stay silent before the session is
     // cleanly torn down (virtual display destroyed). See ConnectionPipeline.backgroundGraceStart.
-    let backgroundGraceDuration: TimeInterval = 300
+    let backgroundGraceDuration: TimeInterval = BackgroundDisplayHoldPolicy.defaultGraceDuration
 
     func startHeartbeatMonitor() {
         heartbeatTimer?.invalidate()
@@ -4023,16 +4211,44 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         }
     }
 
+    /// Builds a sender→receiver control frame (type byte 0x05 + authenticated
+    /// envelope). The receiver only honors sender control sealed like this, so
+    /// an on-path attacker cannot forge heartbeats or disconnect notices on the
+    /// plaintext transport.
+    private static func authenticatedControlPacket(
+        command: UInt8,
+        sequence: UInt64,
+        sessionKey: Data
+    ) -> Data? {
+        let envelope = AuthenticatedEnvelope.seal(
+            sequence: sequence,
+            payload: Data([command]),
+            sessionKey: sessionKey,
+            direction: .senderToReceiver
+        )
+        guard let body = try? JSONEncoder().encode(envelope) else { return nil }
+        var typedPayload = Data([StreamFraming.SenderControlTypeByte.authenticatedControl])
+        typedPayload.append(body)
+        var packet = Data()
+        var lengthPrefix = UInt32(typedPayload.count).bigEndian
+        packet.append(Data(bytes: &lengthPrefix, count: MemoryLayout<UInt32>.size))
+        packet.append(typedPayload)
+        return packet
+    }
+
     private func sendMediaHeartbeat(for pipeline: ConnectionPipeline) {
         guard pipeline.supportsTypeByte, !pipeline.mediaHeartbeatInProgress else { return }
 
-        let payload = Data([0x04])
-        var lengthPrefix = UInt32(payload.count).bigEndian
-        var packet = Data(bytes: &lengthPrefix, count: MemoryLayout<UInt32>.size)
-        packet.append(payload)
+        let sequence = pipeline.outputSequence &+ 1
+        guard let packet = Self.authenticatedControlPacket(
+            command: StreamFraming.SenderControlTypeByte.heartbeatCommand,
+            sequence: sequence,
+            sessionKey: pipeline.sessionKey
+        ) else { return }
         let connectionID = pipeline.id
         let connection = pipeline.connection
         let serviceName = pipeline.service.name
+        pipelines[connectionID]?.outputSequence = sequence
         pipelines[connectionID]?.mediaHeartbeatInProgress = true
         connection.send(content: packet, completion: .contentProcessed { [weak self] error in
             DispatchQueue.main.async { [weak self] in
@@ -4061,7 +4277,18 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     private func scheduleReconnect(to service: DiscoveredService) {
         let key = deviceKey(for: service.name)
         let attempt = (reconnectAttempts[key] ?? 0) + 1
-        guard attempt <= maxReconnectAttempts else {
+        // While this device's display is held, the receiver is knowingly
+        // backgrounded and will come back on its own schedule. Giving up after
+        // three tries would strand the held display until it expired, so the
+        // hold's own deadline becomes the budget instead.
+        let holdDeadline = heldVirtualDisplays[key]?.deadline
+        let isHoldingDisplay = holdDeadline.map { $0 > Date() } ?? false
+        guard BackgroundDisplayHoldPolicy.shouldRetryConnect(
+            attempt: attempt,
+            maximumAttempts: maxReconnectAttempts,
+            holdDeadline: holdDeadline,
+            now: Date()
+        ) else {
             LogManager.shared.log("Sender: Giving up auto-reconnect to \(service.name) after \(maxReconnectAttempts) attempts")
             reconnectAttempts.removeValue(forKey: key)
             if pipelines.isEmpty {
@@ -4071,24 +4298,49 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         }
         reconnectAttempts[key] = attempt
 
-        let delay = pow(2.0, Double(attempt)) // 2s, 4s, 8s
+        // Exponential back-off up to 8s while reconnecting normally; a held
+        // display polls at that same ceiling for the rest of its window rather
+        // than backing off into minutes.
+        let delay = BackgroundDisplayHoldPolicy.retryDelay(
+            attempt: attempt,
+            isHoldingDisplay: isHoldingDisplay
+        ) // 2s, 4s, 8s; capped at 8s while a display is held
         if pipelines.isEmpty {
-            setPhase(.reconnecting, "Reconnecting to \(service.name) (attempt \(attempt) of \(maxReconnectAttempts))...")
+            if isHoldingDisplay {
+                setPhase(.reconnecting, "\(service.name) is in the background — holding the display")
+            } else {
+                setPhase(.reconnecting, "Reconnecting to \(service.name) (attempt \(attempt) of \(maxReconnectAttempts))...")
+            }
         }
-        LogManager.shared.log("Sender: Auto-reconnect to \(service.name) in \(Int(delay))s (attempt \(attempt)/\(maxReconnectAttempts))")
+        LogManager.shared.log(
+            "Sender: Auto-reconnect to \(service.name) in \(Int(delay))s "
+                + (isHoldingDisplay ? "(display held, attempt \(attempt))" : "(attempt \(attempt)/\(maxReconnectAttempts))")
+        )
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             // Abort if this reconnect cycle was cancelled (manual disconnect/forget)
             // or superseded by a newer attempt.
             guard self.reconnectAttempts[key] == attempt else { return }
-            guard !self.connectedServices.contains(where: { self.deviceKey(for: $0.name) == key }),
-                  !self.connectingServiceNames.contains(key) else {
+            guard !self.connectedServices.contains(where: { self.deviceKey(for: $0.name) == key }) else {
                 self.reconnectAttempts.removeValue(forKey: key)
+                return
+            }
+            if self.connectingServiceNames.contains(key) {
+                // A dial for this device is still in flight — an Auto chain can
+                // run for its whole route budget, which outlasts the follow-up
+                // timer below. Abandoning the reconnect chain here left a held
+                // display parked with nothing trying to reclaim it, so re-arm
+                // and let the dial settle. The attempt counter still advances,
+                // so an unheld chain continues to terminate on its own budget.
+                self.scheduleReconnect(to: service)
                 return
             }
             // Prefer the freshest Bonjour record if the device was re-discovered.
             let target = self.foundServices.first(where: { self.deviceKey(for: $0.name) == key }) ?? service
-            LogManager.shared.log("Sender: Auto-reconnecting to \(target.name) (attempt \(attempt)/\(self.maxReconnectAttempts))")
+            LogManager.shared.log(
+                "Sender: Auto-reconnecting to \(target.name) "
+                    + (isHoldingDisplay ? "(display held, attempt \(attempt))" : "(attempt \(attempt)/\(self.maxReconnectAttempts))")
+            )
             self.connect(to: target)
 
             // If this attempt doesn't produce an authenticated session, chain the
@@ -4098,6 +4350,95 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                 guard let self, self.reconnectAttempts[key] == attempt else { return }
                 self.scheduleReconnect(to: service)
             }
+        }
+    }
+
+    // MARK: - Background display hold
+
+    /// How long a virtual display may outlive its connection, measured from the
+    /// moment the receiver announced it was backgrounding. `nil` once the grace
+    /// window has already elapsed, so an expiry teardown never re-holds.
+    private func displayHoldDeadline(for pipeline: ConnectionPipeline) -> Date? {
+        BackgroundDisplayHoldPolicy.holdDeadline(
+            graceStart: pipeline.backgroundGraceStart,
+            graceDuration: backgroundGraceDuration,
+            now: Date()
+        )
+    }
+
+    /// Parks this connection's virtual display for the rest of the grace window
+    /// instead of destroying it. Returns false when there is nothing to hold, in
+    /// which case the caller tears the display down as usual.
+    private func holdVirtualDisplay(for pipeline: ConnectionPipeline) -> Bool {
+        guard let deadline = displayHoldDeadline(for: pipeline),
+              let manager = pipeline.virtualDisplayManager,
+              let displayID = pipeline.virtualDisplayID,
+              let resolution = pipeline.virtualDisplayResolution else { return false }
+
+        let key = deviceKey(for: pipeline.service.name)
+        // A previous hold for the same device would otherwise leak a display
+        // that WindowServer still counts against the one-at-a-time limit.
+        releaseHeldVirtualDisplay(forDeviceKey: key, reason: "superseded by a newer hold")
+
+        // Bounds belong to the connection that is going away; the adopting
+        // session republishes them.
+        manager.onDisplayBoundsChanged = nil
+
+        let expiry = DispatchWorkItem { [weak self] in
+            self?.releaseHeldVirtualDisplay(forDeviceKey: key, reason: "background grace period expired")
+        }
+        heldVirtualDisplays[key] = HeldVirtualDisplay(
+            manager: manager,
+            displayID: displayID,
+            resolution: resolution,
+            serviceName: pipeline.service.name,
+            deadline: deadline,
+            expiryWork: expiry
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + deadline.timeIntervalSinceNow, execute: expiry)
+
+        LogManager.shared.log(
+            "Sender: Holding virtual display \(displayID) for \(pipeline.service.name) "
+                + "for \(Int(deadline.timeIntervalSinceNow))s while the receiver is backgrounded"
+        )
+        return true
+    }
+
+    /// Hands a held display to a new session for the same device, but only when
+    /// it asks for the geometry the display already has.
+    private func claimHeldVirtualDisplay(
+        forDeviceKey key: String,
+        matching resolution: VirtualDisplayManager.Resolution
+    ) -> HeldVirtualDisplay? {
+        guard let held = heldVirtualDisplays[key] else { return nil }
+        guard BackgroundDisplayHoldPolicy.canAdoptHeldDisplay(
+            held: held.resolution,
+            requested: resolution,
+            deadline: held.deadline,
+            now: Date()
+        ) else {
+            releaseHeldVirtualDisplay(forDeviceKey: key, reason: "receiver returned wanting a different display size")
+            return nil
+        }
+        held.expiryWork?.cancel()
+        heldVirtualDisplays.removeValue(forKey: key)
+        return held
+    }
+
+    private func releaseHeldVirtualDisplay(forDeviceKey key: String, reason: String) {
+        guard let held = heldVirtualDisplays.removeValue(forKey: key) else { return }
+        held.expiryWork?.cancel()
+        held.manager.destroyDisplay()
+        LogManager.shared.log("Sender: Released held virtual display \(held.displayID) for \(held.serviceName) — \(reason)")
+        if pipelines.isEmpty && heldVirtualDisplays.isEmpty && connectionPhase == .reconnecting {
+            setPhase(.disconnected, "Disconnected")
+        }
+        updateConnectedDisplays()
+    }
+
+    private func releaseAllHeldVirtualDisplays(reason: String) {
+        for key in Array(heldVirtualDisplays.keys) {
+            releaseHeldVirtualDisplay(forDeviceKey: key, reason: reason)
         }
     }
 
@@ -4113,8 +4454,15 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         pipeline.processAudioCapture?.stop()
         pipeline.audioConnection?.cancel()
         pipeline.videoEncoder?.invalidate()
-        pipeline.virtualDisplayManager?.destroyDisplay()
-        let didSendDisconnectNotice = sendDisconnectNotice(for: pipeline)
+        // Keep the display alive across a backgrounded receiver's transport
+        // reset; only a real teardown destroys it.
+        let didHoldDisplay = holdVirtualDisplay(for: pipeline)
+        if !didHoldDisplay {
+            pipeline.virtualDisplayManager?.destroyDisplay()
+        }
+        // "Sender stopped sharing" is the wrong thing to tell a receiver we
+        // intend to reconnect to. Holding means this is a pause, not an end.
+        let didSendDisconnectNotice = didHoldDisplay ? false : sendDisconnectNotice(for: pipeline)
         if didSendDisconnectNotice {
             let connection = pipeline.connection
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -4134,14 +4482,18 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         LogManager.shared.log("Sender: Disconnected from \(pipeline.service.name)\(reasonNote). Remaining: \(remaining)")
 
         if remaining == 0 {
-            setPhase(.disconnected, "Disconnected")
+            if didHoldDisplay {
+                setPhase(.reconnecting, "\(pipeline.service.name) is in the background — holding the display")
+            } else {
+                setPhase(.disconnected, "Disconnected")
+            }
             heartbeatTimer?.invalidate()
         } else {
             setPhase(.connected, "Connected to \(remaining) device(s)")
         }
         updateConnectedDisplays()
 
-        if attemptReconnect {
+        if attemptReconnect || didHoldDisplay {
             scheduleReconnect(to: pipeline.service)
         }
     }
@@ -4149,11 +4501,13 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     private func sendDisconnectNotice(for pipeline: ConnectionPipeline) -> Bool {
         guard pipeline.supportsTypeByte else { return false }
 
-        var packet = Data()
-        let payload = Data([0x03])
-        var lengthPrefix = UInt32(payload.count).bigEndian
-        packet.append(Data(bytes: &lengthPrefix, count: 4))
-        packet.append(payload)
+        let sequence = pipeline.outputSequence &+ 1
+        guard let packet = Self.authenticatedControlPacket(
+            command: StreamFraming.SenderControlTypeByte.disconnectCommand,
+            sequence: sequence,
+            sessionKey: pipeline.sessionKey
+        ) else { return false }
+        pipelines[pipeline.id]?.outputSequence = sequence
 
         let serviceName = pipeline.service.name
         pipeline.connection.send(content: packet, completion: .contentProcessed { error in
@@ -4168,6 +4522,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
 
     func disconnect() {
         reconnectAttempts.removeAll()
+        releaseAllHeldVirtualDisplays(reason: "user disconnected")
         let pending = pendingConnections.values
         pendingConnections.removeAll()
         connectingServiceNames.removeAll()
@@ -4199,7 +4554,11 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     func disconnectService(_ service: DiscoveredService) {
         let serviceKey = deviceKey(for: service.name)
         reconnectAttempts.removeValue(forKey: serviceKey)
+        releaseHeldVirtualDisplay(forDeviceKey: serviceKey, reason: "user disconnected the device")
         if let entry = pipelines.first(where: { deviceKey(for: $0.value.service.name) == serviceKey }) {
+            // An explicit disconnect ends the background grace too, so the
+            // display is retired instead of held.
+            pipelines[entry.key]?.backgroundGraceStart = nil
             removeConnection(entry.key)
         }
     }
@@ -4207,6 +4566,11 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     func disconnectConnection(_ connectionId: UUID) {
         if let pipeline = pipelines[connectionId] {
             clearReconnectState(forServiceNamed: pipeline.service.name)
+            releaseHeldVirtualDisplay(
+                forDeviceKey: deviceKey(for: pipeline.service.name),
+                reason: "user disconnected the device"
+            )
+            pipelines[connectionId]?.backgroundGraceStart = nil
         }
         removeConnection(connectionId)
     }
@@ -4246,24 +4610,40 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     }
     
     private func startStatsTimer() {
-        // Simple timer to update transfer rate UI
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+        statsTimer?.invalidate()
+        bytesSentWindow = 0
+        lastStatsTime = Date()
+
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] timer in
             guard let self = self else { timer.invalidate(); return }
-            if self.pipelines.isEmpty { timer.invalidate(); return }
-            
+            if self.pipelines.isEmpty {
+                timer.invalidate()
+                if self.statsTimer === timer { self.statsTimer = nil }
+                self.transferRate = "0 Mbps"
+                return
+            }
+
+            let now = Date()
+            let elapsed = now.timeIntervalSince(self.lastStatsTime)
+            self.lastStatsTime = now
             let bytes = self.bytesSentWindow
             self.bytesSentWindow = 0
-            
-            let mbps = Double(bytes * 8) / 1_000_000.0
+
+            let mbps = VideoTransferRatePolicy.megabitsPerSecond(
+                byteCount: bytes,
+                elapsedSeconds: elapsed
+            )
             self.transferRate = String(format: "%.1f Mbps", mbps)
         }
+        statsTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
     
     private func receive(on connection: NWConnection, connectionId: UUID) {
         receiveTCP(on: connection, connectionId: connectionId)
     }
     
-    private func receiveTCP(on connection: NWConnection, connectionId: UUID) {
+    private func receiveTCP(on connection: NWConnection, connectionId: UUID, consecutiveAnomalies: Int = 0) {
         // Don't schedule receives on dead connections
         guard pipelines[connectionId] != nil else { return }
 
@@ -4279,8 +4659,17 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                     }
                     return
                 }
-                // Non-fatal (e.g. ENODATA/96): keep receiving, don't spam logs
-                self?.receiveTCP(on: connection, connectionId: connectionId)
+                // Non-fatal errors (e.g. ENODATA/96) are retried, but never in a
+                // tight loop: a connection that keeps erroring without dying gets
+                // torn down instead of spinning the receive callback hot.
+                if consecutiveAnomalies >= 25 || connection.state != .ready {
+                    LogManager.shared.log("Sender: Receive path to \(connectionId) persistently failing (\(error)); closing")
+                    DispatchQueue.main.async { [weak self] in
+                        self?.removeConnection(connectionId, attemptReconnect: true, reason: "persistent receive error")
+                    }
+                    return
+                }
+                self?.receiveTCP(on: connection, connectionId: connectionId, consecutiveAnomalies: consecutiveAnomalies + 1)
                 return
             }
 
@@ -4328,12 +4717,18 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
 
                         do {
                             let envelope = try JSONDecoder().decode(AuthenticatedEnvelope.self, from: body)
+                            // Authenticate first, then apply replay protection:
+                            // the sequence field is itself untrusted until the
+                            // MAC covers it.
+                            let payload = try envelope.verifiedPayload(
+                                sessionKey: pipeline.sessionKey,
+                                direction: .receiverToSender
+                            )
                             guard envelope.sequence > pipeline.lastInputSequence else {
                                 LogManager.shared.log("Sender: Ignoring replayed input envelope from \(pipeline.service.name)")
                                 return
                             }
 
-                            let payload = try envelope.verifiedPayload(sessionKey: pipeline.sessionKey)
                             if let event = try? JSONDecoder().decode(InputEvent.self, from: payload) {
                                 self.pipelines[connectionId]?.lastInputSequence = envelope.sequence
                                 self.pipelines[connectionId]?.lastHeartbeat = Date()
@@ -4365,8 +4760,17 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                                 } else if event.type == .command && event.keyCode == 999 {
                                     self.pipelines[connectionId]?.videoEncoder?.forceKeyframe()
                                 } else if event.type == .command && event.keyCode == 777 {
-                                    // Screen info from receiver: deltaX=width, deltaY=height (pixels)
-                                    self.handleScreenInfo(for: connectionId, width: Int(event.deltaX), height: Int(event.deltaY))
+                                    // Screen info from receiver: deltaX=width, deltaY=height (pixels).
+                                    // JSONDecoder accepts 1e999 as +Inf without error, and
+                                    // Int(Double) traps on non-finite values — convert defensively
+                                    // or a single malformed 777 crashes the whole sender.
+                                    guard event.deltaX.isFinite, event.deltaY.isFinite,
+                                          let reportedWidth = Int(exactly: event.deltaX),
+                                          let reportedHeight = Int(exactly: event.deltaY) else {
+                                        LogManager.shared.log("Sender: Ignoring malformed screen info (deltaX=\(event.deltaX), deltaY=\(event.deltaY)) from \(pipeline.service.name)")
+                                        return
+                                    }
+                                    self.handleScreenInfo(for: connectionId, width: reportedWidth, height: reportedHeight)
                                 } else {
                                     // Display-only mode: authenticated receiver commands are allowed,
                                     // but iPad pointer, scroll, touch, and keyboard input are ignored.
@@ -4383,7 +4787,15 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                     self?.receiveTCP(on: connection, connectionId: connectionId)
                 }
             } else {
-                self?.receiveTCP(on: connection, connectionId: connectionId)
+                // Empty read with no error and no EOF. Rare and harmless once,
+                // suspicious in a loop — treat it like a non-fatal receive error.
+                if consecutiveAnomalies >= 25 || connection.state != .ready {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.removeConnection(connectionId, attemptReconnect: true, reason: "empty receive spin")
+                    }
+                    return
+                }
+                self?.receiveTCP(on: connection, connectionId: connectionId, consecutiveAnomalies: consecutiveAnomalies + 1)
             }
         }
     }
@@ -4460,10 +4872,20 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                     }
 
                     if let envelope = try? JSONDecoder().decode(AuthenticatedEnvelope.self, from: body),
-                       let payload = try? envelope.verifiedPayload(sessionKey: sessionKey),
+                       let payload = try? envelope.verifiedPayload(
+                           sessionKey: sessionKey,
+                           direction: .receiverToSender
+                       ),
                        let event = try? JSONDecoder().decode(InputEvent.self, from: payload),
                        event.type == .command,
                        event.keyCode == 888 {
+                        // Replay protection: a captured heartbeat envelope must not
+                        // be able to keep a dead receiver's session alive forever.
+                        guard envelope.sequence > pipeline.audioInputSequence else {
+                            LogManager.shared.log("AudioConnection: Ignoring replayed heartbeat envelope")
+                            return
+                        }
+                        self.pipelines[connectionId]?.audioInputSequence = envelope.sequence
                         self.pipelines[connectionId]?.lastHeartbeat = Date()
                     }
                 }
@@ -4476,6 +4898,12 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     // Receiver reports its native screen dimensions so we can match the aspect ratio
     private func handleScreenInfo(for connectionId: UUID, width: Int, height: Int) {
         guard width > 0 && height > 0 else { return }
+        // A real screen is never larger than this; absurd values would drive the
+        // virtual display through oversized modes. Ignore instead of rebuilding.
+        guard width <= 8192, height <= 8192 else {
+            LogManager.shared.log("Sender: Ignoring implausible screen info \(width)x\(height) from \(pipelines[connectionId]?.service.name ?? "unknown")")
+            return
+        }
         guard let pipeline = pipelines[connectionId] else { return }
 
         let serviceName = pipeline.service.name
@@ -4487,19 +4915,33 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         let oldW = pipeline.reportedScreenWidth
         let oldH = pipeline.reportedScreenHeight
 
-        // Skip if dimensions haven't changed
-        if oldW == width && oldH == height { return }
+        // Skip if dimensions haven't changed. Skip micro-changes too: a rebuild
+        // tears down and recreates the virtual display, encoder, and capture,
+        // so an authenticated peer flipping between 1536 and 1537 must not be
+        // able to keep the Mac rebuilding pipelines.
+        if let oldW, let oldH,
+           abs(width - oldW) < 4, abs(height - oldH) < 4 { return }
 
         pipelines[connectionId]?.reportedScreenWidth = width
         pipelines[connectionId]?.reportedScreenHeight = height
         LogManager.shared.log("Sender: Screen info from \(serviceName): \(width)x\(height)")
 
-        // Restart pipeline with new dimensions
-        stopPipeline(for: connectionId)
-        startPipeline(for: connectionId)
+        // Restart pipeline with new dimensions, debounced. Rotation reports one
+        // stable pair, but a flapping source (or a hostile paired device) must
+        // not trigger teardown/rebuild cycles back to back.
+        pipelines[connectionId]?.screenInfoRebuildWork?.cancel()
+        let rebuild = DispatchWorkItem { [weak self] in
+            guard let self, self.pipelines[connectionId] != nil else { return }
+            self.stopPipeline(for: connectionId)
+            self.startPipeline(for: connectionId)
+        }
+        pipelines[connectionId]?.screenInfoRebuildWork = rebuild
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: rebuild)
     }
 
     private func stopPipeline(for connectionId: UUID) {
+        pipelines[connectionId]?.screenInfoRebuildWork?.cancel()
+        pipelines[connectionId]?.screenInfoRebuildWork = nil
         pipelines[connectionId]?.lifecycleGeneration &+= 1
         pipelines[connectionId]?.screenRecorder?.stopCapture()
         pipelines[connectionId]?.screenRecorder = nil
@@ -4518,10 +4960,14 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         pipelines[connectionId]?.audioPacketSender = nil
         pipelines[connectionId]?.framesInFlight = 0
         pipelines[connectionId]?.pendingKeyframePacket = nil
+        // Both callers are deliberate rebuilds (geometry or settings changed),
+        // so the display is genuinely retired rather than held.
         if let dm = pipelines[connectionId]?.virtualDisplayManager {
             dm.destroyDisplay()
             pipelines[connectionId]?.virtualDisplayManager = nil
         }
+        pipelines[connectionId]?.virtualDisplayResolution = nil
+        pipelines[connectionId]?.virtualDisplayID = nil
     }
 
     func startPipeline(for connectionId: UUID, expectedGeneration: UInt64? = nil) {
@@ -4545,19 +4991,6 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
 
         // Create virtual display if enabled
         if useVirtualDisplay {
-            LogManager.shared.log("Sender: Creating virtual display for \(serviceName)...")
-            let displayManager = VirtualDisplayManager()
-            displayManager.onDisplayBoundsChanged = { [weak self] bounds in
-                DispatchQueue.main.async { [weak self] in
-                    guard let self,
-                          self.pipelines[connectionId]?.lifecycleGeneration == lifecycleGeneration,
-                          self.pipelines[connectionId]?.virtualDisplayManager === displayManager else { return }
-                    InputHandler.shared.updateDisplayBounds(bounds: bounds, for: connectionId)
-                    LogManager.shared.log("Sender: Updated display placement for \(serviceName): \(bounds)")
-                    self.updateConnectedDisplays()
-                }
-            }
-
             // Use receiver-reported aspect ratio, but expose a smaller HiDPI logical mode.
             let res: (width: Int, height: Int, ppi: Int)
             if let receiverDisplaySize {
@@ -4575,38 +5008,70 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                 name: "Screen Bridge Display (\(serviceName))"
             )
 
-            if let displayID = displayManager.createDisplay(resolution: resolution, placement: displayPlacement) {
+            // A display held over the receiver's background gap is reused rather
+            // than rebuilt: recreating it would bounce every window back to the
+            // Mac's own screen, and WindowServer would refuse to publish the new
+            // one while the held one is still alive.
+            let deviceKeyForHold = deviceKey(for: serviceName)
+            let displayManager: VirtualDisplayManager
+            let adoptedDisplayID: CGDirectDisplayID?
+            if let adopted = claimHeldVirtualDisplay(forDeviceKey: deviceKeyForHold, matching: resolution) {
+                displayManager = adopted.manager
+                adoptedDisplayID = adopted.displayID
+                LogManager.shared.log("Sender: Reusing held virtual display \(adopted.displayID) for \(serviceName) — windows stay where they were")
+            } else {
+                // WindowServer publishes one private virtual display at a time,
+                // so a display parked for some other backgrounded device would
+                // make the one created here come up silently offline. A device
+                // that is connecting right now outranks a parked one.
+                for key in Array(heldVirtualDisplays.keys) where key != deviceKeyForHold {
+                    releaseHeldVirtualDisplay(
+                        forDeviceKey: key,
+                        reason: "another receiver is connecting and needs the display slot"
+                    )
+                }
+                displayManager = VirtualDisplayManager()
+                adoptedDisplayID = nil
+                LogManager.shared.log("Sender: Creating virtual display for \(serviceName)...")
+            }
+
+            displayManager.onDisplayBoundsChanged = { [weak self] bounds in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          self.pipelines[connectionId]?.lifecycleGeneration == lifecycleGeneration,
+                          self.pipelines[connectionId]?.virtualDisplayManager === displayManager else { return }
+                    InputHandler.shared.updateDisplayBounds(bounds: bounds, for: connectionId)
+                    LogManager.shared.log("Sender: Updated display placement for \(serviceName): \(bounds)")
+                    self.updateConnectedDisplays()
+                }
+            }
+
+            if let displayID = adoptedDisplayID
+                ?? displayManager.createDisplay(resolution: resolution, placement: displayPlacement) {
                 targetDisplayID = displayID
                 pipelines[connectionId]?.virtualDisplayManager = displayManager
+                pipelines[connectionId]?.virtualDisplayResolution = resolution
+                pipelines[connectionId]?.virtualDisplayID = displayID
 
                 // Update InputHandler with this connection's display bounds
                 // Retry with increasing delays — macOS may take time to register the virtual display
-                @Sendable func pollDisplayBounds(attempt: Int) {
-                    guard self.pipelines[connectionId]?.lifecycleGeneration == lifecycleGeneration,
-                          self.pipelines[connectionId]?.virtualDisplayManager === displayManager else { return }
-                    let bounds = CGDisplayBounds(displayID)
-                    if bounds.width > 0 && bounds.height > 0 {
-                        InputHandler.shared.updateDisplayBounds(bounds: bounds, for: connectionId)
-                        LogManager.shared.log("Sender: Virtual display for \(serviceName) bounds: \(bounds) (attempt \(attempt))")
-                        self.updateConnectedDisplays()
-                    } else if attempt < 10 {
-                        // Retry after increasing delay (0.5s, 1s, 1.5s, ...)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + Double(attempt) * 0.5) {
-                            pollDisplayBounds(attempt: attempt + 1)
-                        }
-                    } else {
-                        // Fallback: use the resolution we requested
-                        let fallbackBounds = CGRect(x: 0, y: 0, width: res.width, height: res.height)
-                        InputHandler.shared.updateDisplayBounds(bounds: fallbackBounds, for: connectionId)
-                        LogManager.shared.log("Sender: Virtual display bounds unavailable after retries, using fallback: \(fallbackBounds)")
-                    }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    pollDisplayBounds(attempt: 1)
+                let serviceNameForPoll = serviceName
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    self?.pollDisplayBounds(
+                        attempt: 1,
+                        displayID: displayID,
+                        connectionId: connectionId,
+                        lifecycleGeneration: lifecycleGeneration,
+                        displayManager: displayManager,
+                        fallbackSize: CGSize(width: res.width, height: res.height),
+                        serviceName: serviceNameForPoll
+                    )
                 }
 
-                LogManager.shared.log("Sender: Virtual display created for \(serviceName) with ID \(displayID)")
-                LogManager.shared.log("Sender: Go to System Settings > Displays to arrange it")
+                if adoptedDisplayID == nil {
+                    LogManager.shared.log("Sender: Virtual display created for \(serviceName) with ID \(displayID)")
+                    LogManager.shared.log("Sender: Go to System Settings > Displays to arrange it")
+                }
             } else {
                 LogManager.shared.log("Sender: Failed to create virtual display for \(serviceName); refusing to mirror the main screen in Extended Display mode")
                 removeConnection(connectionId)
@@ -4615,6 +5080,12 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                 return
             }
         } else {
+            // Extended display was switched off while this device was away; the
+            // hold has nothing left to be adopted by.
+            releaseHeldVirtualDisplay(
+                forDeviceKey: deviceKey(for: serviceName),
+                reason: "extended display is no longer in use"
+            )
             LogManager.shared.log("Sender: Using main screen (mirroring mode) for \(serviceName)")
             let mainBounds = CGDisplayBounds(CGMainDisplayID())
             if mainBounds.width > 0 && mainBounds.height > 0 {
@@ -4712,6 +5183,46 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         }
     }
 
+    /// Polls until WindowServer publishes bounds for the virtual display, then
+    /// records them for the connection. A method (rather than a nested closure)
+    /// so retries hold the client weakly.
+    private func pollDisplayBounds(
+        attempt: Int,
+        displayID: CGDirectDisplayID,
+        connectionId: UUID,
+        lifecycleGeneration: UInt64,
+        displayManager: VirtualDisplayManager,
+        fallbackSize: CGSize,
+        serviceName: String
+    ) {
+        guard pipelines[connectionId]?.lifecycleGeneration == lifecycleGeneration,
+              pipelines[connectionId]?.virtualDisplayManager === displayManager else { return }
+        let bounds = CGDisplayBounds(displayID)
+        if bounds.width > 0 && bounds.height > 0 {
+            InputHandler.shared.updateDisplayBounds(bounds: bounds, for: connectionId)
+            LogManager.shared.log("Sender: Virtual display for \(serviceName) bounds: \(bounds) (attempt \(attempt))")
+            updateConnectedDisplays()
+        } else if attempt < 10 {
+            // Retry after increasing delay (0.5s, 1s, 1.5s, ...)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(attempt) * 0.5) { [weak self] in
+                self?.pollDisplayBounds(
+                    attempt: attempt + 1,
+                    displayID: displayID,
+                    connectionId: connectionId,
+                    lifecycleGeneration: lifecycleGeneration,
+                    displayManager: displayManager,
+                    fallbackSize: fallbackSize,
+                    serviceName: serviceName
+                )
+            }
+        } else {
+            // Fallback: use the resolution we requested
+            let fallbackBounds = CGRect(origin: .zero, size: fallbackSize)
+            InputHandler.shared.updateDisplayBounds(bounds: fallbackBounds, for: connectionId)
+            LogManager.shared.log("Sender: Virtual display bounds unavailable after retries, using fallback: \(fallbackBounds)")
+        }
+    }
+
     private func desiredAudioEnabled(for connectionId: UUID) -> Bool {
         connectedDisplays.first(where: { $0.id == connectionId })?.audioEnabled
             ?? audioStreamingEnabled
@@ -4729,6 +5240,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     /// the virtual display stay untouched while Chrome appears or the audio TCP
     /// transport reconnects.
     private func recoverAudioPipelines() {
+        let now = Date()
         for connectionId in Array(pipelines.keys) {
             guard let pipeline = pipelines[connectionId],
                   desiredAudioEnabled(for: connectionId),
@@ -4745,7 +5257,18 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             }
 
             guard let currentPipeline = pipelines[connectionId] else { continue }
-            if currentPipeline.processAudioCapture == nil || currentPipeline.audioConnection == nil {
+            if currentPipeline.processAudioCapture == nil {
+                // Process enumeration is cheap, and a long exponential backoff
+                // made enabling Chrome audio take up to a minute after the app
+                // was opened. Retry on the existing three-second recovery tick.
+                if currentPipeline.audioState == .waitingForChrome {
+                    guard now.timeIntervalSince(currentPipeline.lastChromeTapAttempt) >= 3 else {
+                        continue
+                    }
+                }
+                reconcileAudioPipeline(for: connectionId)
+            } else if currentPipeline.audioConnection == nil {
+                // Tap exists but its transport died: reconnect promptly.
                 reconcileAudioPipeline(for: connectionId)
             }
         }
@@ -4770,8 +5293,15 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         }
 
         let audioEncoder = AudioEncoder(connectionId: connectionId)
+        // Explicit Chrome app families. ProcessAudioTapCapture admits only each
+        // named app plus its `.helper` audio-service descendants.
         let processTap = ProcessAudioTapCapture(
-            bundleIDPrefixes: ["com.google.Chrome"],
+            bundleIDs: [
+                "com.google.Chrome",
+                "com.google.Chrome.canary",
+                "com.google.Chrome.dev",
+                "com.google.Chrome.beta",
+            ],
             muteProcess: true
         ) { audioBufferList, format, inputTime in
             audioEncoder.encode(audioBufferList: audioBufferList, sourceFormat: format, inputTime: inputTime)
@@ -4793,6 +5323,9 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             switch error {
             case .noMatchingAudioProcess:
                 setAudioState(.waitingForChrome, for: connectionId)
+                // Keep the retry prompt: opening Chrome after sharing starts
+                // should restore audio within the next recovery tick.
+                pipelines[connectionId]?.lastChromeTapAttempt = Date()
             case .unsupportedOS:
                 setAudioState(.failed, for: connectionId)
             default:
@@ -4953,7 +5486,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         var packet = Data()
         if pipeline.supportsTypeByte {
             // Format: [4-byte length][1-byte type: 0x01=video][payload]
-            var typedPayload = Data([0x01])
+            var typedPayload = Data([StreamFraming.SenderControlTypeByte.video])
             typedPayload.append(data)
             var lengthPrefix = UInt32(typedPayload.count).bigEndian
             packet.append(Data(bytes: &lengthPrefix, count: 4))

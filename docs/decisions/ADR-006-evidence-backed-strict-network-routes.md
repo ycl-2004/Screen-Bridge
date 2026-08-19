@@ -27,7 +27,11 @@ Official API references:
 
 Screen Bridge exposes four modes:
 
-- Auto allows Network.framework to select any non-loopback route.
+- Auto uses the interfaces attached to the receiver's Bonjour result as an
+  ordered reachability plan: wired first, then infrastructure Wi-Fi, then AWDL,
+  with an unscoped Network.framework attempt last for compatibility. A failed
+  candidate keeps the same per-device connection reservation and advances to
+  the next candidate instead of starting a competing dial chain.
 - Require Cable accepts only Bonjour results with a wired interface and sets
   that exact interface as `NWParameters.requiredInterface`.
 - AWDL accepts only Bonjour results observed on `awdl`/`llw` and requires that
@@ -42,8 +46,9 @@ the mode applies to new connections.
 
 The UI reports three separate facts: requested route, Network.framework path
 type, and interface evidence. It never labels an item from
-`availableInterfaces` as the active interface. Auto intentionally reports that
-there is no physical-interface proof.
+`availableInterfaces` as the active interface. Auto reports concrete evidence
+when it scoped a candidate with `requiredInterface`; only its final unscoped
+compatibility attempt reports that there is no physical-interface proof.
 
 The iPad keeps one listener. It first binds TCP 51820 and advertises the actual
 listener endpoint through Bonjour. If that port is already in use, it retries
@@ -54,7 +59,14 @@ direct diagnostics and controlled local tests predictable.
 
 Cable and AWDL failures are now honest and actionable, at the cost of no longer
 masking unavailable strict routes with a working Wi-Fi connection. Auto remains
-the user-friendly choice when reachability matters more than transport.
+the user-friendly choice when reachability matters more than transport and no
+longer gets stranded on the first unreachable interface selected by the system.
+
+This Auto ordering was added after a real iPad advertised the same service on
+`en8`, `en10`, and `en0`: the former unscoped Auto dial timed out, while the
+same endpoint connected immediately when scoped to `en8`. The updated Auto
+mode selected that Bonjour-backed wired candidate and completed authentication
+on its first attempt.
 
 USB is opportunistic: Require Cable can succeed only when macOS/iPadOS expose a
 usable IP interface and Bonjour observes the receiver there. The app does not

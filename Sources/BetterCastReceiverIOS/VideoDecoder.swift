@@ -54,22 +54,56 @@ final class VideoDecoder: @unchecked Sendable {
     }
     
     private var formatDescription: CMVideoFormatDescription?
-    
+
     // NALU buffer management
     private var sps: Data?
     private var pps: Data?
     private var configuredSPS: Data?
     private var configuredPPS: Data?
-    
-    private var timeOffset: Double = 0
-    
+
+    /// Bounds the access units waiting on `decoderQueue`. Without a cap, a
+    /// decoder persistently slower than the network's arrival rate accumulated
+    /// unbounded memory (each queued entry may be a 16 MB keyframe) until the
+    /// system killed the app.
+    private let pendingBytesLock = NSLock()
+    private var pendingDecodeBytes = 0
+    private static let maximumPendingDecodeBytes = 32 * 1024 * 1024
+    private var lastQueueDropLog = Date.distantPast
+
+    /// Rate-limits decompression-session (re)creation: a sender that churns
+    /// SPS/PPS (or a device that cannot create the session at all) must not be
+    /// able to drive heavyweight recreate/wait cycles on every access unit.
+    private var lastSessionCreationAttempt = Date.distantPast
+    private static let sessionCreationRetryInterval: TimeInterval = 0.5
+
     init() {
         decoderQueue.setSpecific(key: decoderQueueKey, value: 1)
     }
 
     func decode(data: Data) {
+        let admitted: Bool = pendingBytesLock.withLock { () -> Bool in
+            guard pendingDecodeBytes + data.count <= Self.maximumPendingDecodeBytes else { return false }
+            pendingDecodeBytes += data.count
+            return true
+        }
+        if !admitted {
+            // Over budget: drop the access unit and ask for a keyframe rather
+            // than queueing unbounded latency and memory.
+            if Date().timeIntervalSince(lastQueueDropLog) > 1.0 {
+                lastQueueDropLog = Date()
+                LogManager.shared.log("VideoDecoder: Decode queue over budget (\(pendingDecodeBytes) bytes pending); dropping frames until a keyframe")
+            }
+            reportDecodeFailure(status: kVTVideoDecoderMalfunctionErr)
+            return
+        }
         decoderQueue.async { [weak self] in
-            self?.decodeOnQueue(data: data)
+            guard let self else { return }
+            defer {
+                self.pendingBytesLock.lock()
+                self.pendingDecodeBytes = max(0, self.pendingDecodeBytes - data.count)
+                self.pendingBytesLock.unlock()
+            }
+            self.decodeOnQueue(data: data)
         }
     }
 
@@ -92,11 +126,17 @@ final class VideoDecoder: @unchecked Sendable {
         if let newSPS = parsed.sps { sps = newSPS }
         if let newPPS = parsed.pps { pps = newPPS }
 
-        createDecompressionSessionIfReady()
-
-        if decompressionSession != nil {
-            decodeFrame(data: payload.accessUnit, ptsNanos: payload.presentationTimeNanos)
+        guard createDecompressionSessionIfReady() else {
+            // Never feed an access unit carrying new parameter sets into the
+            // previous session while recreation is rate-limited or failed.
+            // A fresh keyframe is safer than decoding with stale codec state.
+            if parsed.sps != nil || parsed.pps != nil {
+                reportDecodeFailure(status: kVTVideoDecoderBadDataErr)
+            }
+            return
         }
+
+        decodeFrame(data: payload.accessUnit, ptsNanos: payload.presentationTimeNanos)
     }
 
     /// Drops the decoder state so a new session starts from a fresh keyframe.
@@ -111,8 +151,11 @@ final class VideoDecoder: @unchecked Sendable {
             pps = nil
             configuredSPS = nil
             configuredPPS = nil
-            timeOffset = 0
+            lastSessionCreationAttempt = .distantPast
         }
+        pendingBytesLock.lock()
+        pendingDecodeBytes = 0
+        pendingBytesLock.unlock()
         LogManager.shared.log("VideoDecoder: Reset for new session")
     }
 
@@ -147,18 +190,26 @@ final class VideoDecoder: @unchecked Sendable {
         callbackContext = nil
     }
     
-    private func createDecompressionSessionIfReady() {
-        guard let sps = sps, let pps = pps else { return }
+    private func createDecompressionSessionIfReady() -> Bool {
+        guard let sps = sps, let pps = pps else { return false }
         if decompressionSession != nil,
            configuredSPS == sps,
            configuredPPS == pps {
-            return
+            return true
         }
-        
+
+        // Rate-limit session (re)creation. Every recreation waits for in-flight
+        // frames, so a sender flipping parameter sets on every access unit (or
+        // a device where creation always fails) must not drive a recreate/retry
+        // storm at frame rate.
+        let now = Date()
+        guard now.timeIntervalSince(lastSessionCreationAttempt) >= Self.sessionCreationRetryInterval else { return false }
+        lastSessionCreationAttempt = now
+
         let parameterSets = [sps, pps]
         let parameterSetPointers = parameterSets.map { ($0 as NSData).bytes.bindMemory(to: UInt8.self, capacity: $0.count) }
         let parameterSetSizes = parameterSets.map { $0.count }
-        
+
         var _formatDescription: CMFormatDescription?
         let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
             allocator: kCFAllocatorDefault,
@@ -168,12 +219,12 @@ final class VideoDecoder: @unchecked Sendable {
             nalUnitHeaderLength: 4,
             formatDescriptionOut: &_formatDescription
         )
-        
+
         guard status == noErr, let formatDesc = _formatDescription else {
             LogManager.shared.log("VideoDecoder: Failed to create format description \(status)")
-            return
+            return false
         }
-        
+
         // Parameter sets may change without a dimension change. Recreate for
         // either case so the decoder never runs with stale codec state.
         var needsNewSession = decompressionSession == nil
@@ -185,7 +236,6 @@ final class VideoDecoder: @unchecked Sendable {
             }
             needsNewSession = true
             invalidateCurrentSession()
-            timeOffset = 0
         }
 
         self.formatDescription = formatDesc
@@ -226,6 +276,10 @@ final class VideoDecoder: @unchecked Sendable {
                 LogManager.shared.log("VideoDecoder: Failed to create session \(sessionStatus)")
             }
         }
+
+        return decompressionSession != nil
+            && configuredSPS == sps
+            && configuredPPS == pps
     }
     
     private func decodeFrame(data: Data, ptsNanos: UInt64) {
@@ -258,17 +312,14 @@ final class VideoDecoder: @unchecked Sendable {
         
         var sampleBuffer: CMSampleBuffer?
         let sampleSizeArray = [nalData.count]
-        
-             // Time Synchronization logic (Mac Port)
-             if self.timeOffset == 0 {
-                 let now = CMClockGetTime(CMClockGetHostTimeClock()).seconds
-                 let senderTime = Double(ptsNanos) / 1_000_000_000.0
-                 self.timeOffset = now - senderTime
-             }
-             
-             let hostTime = CMClockGetTime(CMClockGetHostTimeClock())
-             // 50ms buffer
-             let presentationTime = CMTimeAdd(hostTime, CMTime(seconds: 0.05, preferredTimescale: 1_000_000_000))
+
+        // Presentation time is "now + 50 ms" on the receiver's own clock: the
+        // sender's 8-byte PTS is parsed off the wire for framing compatibility
+        // but is deliberately not used for timing — the two clocks are not
+        // synchronized and drift apart over long sessions.
+        let hostTime = CMClockGetTime(CMClockGetHostTimeClock())
+        // 50ms buffer
+        let presentationTime = CMTimeAdd(hostTime, CMTime(seconds: 0.05, preferredTimescale: 1_000_000_000))
              
              var timing = CMSampleTimingInfo(
                  duration: CMTime.invalid,

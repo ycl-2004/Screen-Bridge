@@ -24,6 +24,21 @@ private struct VideoTransfer<Value>: @unchecked Sendable {
     let value: Value
 }
 
+/// Shared launch-scoped de-duplication for hardware-property diagnostics.
+/// The lock is part of the value's synchronization contract, so the wrapper is
+/// explicitly unchecked-Sendable instead of exposing a mutable static `Set` to
+/// Swift 6's global-state checker.
+private final class VideoEncoderUnsupportedPropertyLogger: @unchecked Sendable {
+    private let lock = NSLock()
+    private var labels: Set<String> = []
+
+    func insertIfNew(_ label: String) -> Bool {
+        lock.withLock {
+            labels.insert(label).inserted
+        }
+    }
+}
+
 protocol VideoEncoderDelegate: AnyObject {
     func videoEncoder(_ encoder: VideoEncoder, didEncode data: Data, for connectionId: UUID, isKeyframe: Bool)
 }
@@ -35,16 +50,15 @@ final class VideoEncoder: @unchecked Sendable {
     private var frameCount = 0
     private var bitrate: Int
 
-    /// Guards the session against use after teardown.
-    ///
-    /// The VideoToolbox callback is registered with `passUnretained(self)`, so a
-    /// session that outlives this object would call back into freed memory.
-    /// `invalidate()` drains and tears the session down before that can happen,
-    /// and `deinit` is the backstop for callers that forget.
+    /// The output callback holds a **retained** reference (`passRetained`) that
+    /// only `invalidate()` releases, so an owner that drops the encoder without
+    /// invalidating leaks rather than letting VideoToolbox call back into freed
+    /// memory. Every owner path invalidates before dropping.
     private let encoderQueue = DispatchQueue(label: "com.yccast.video-encoder.lifecycle")
     private let encoderQueueKey = DispatchSpecificKey<UInt8>()
     private let callbackQueue = DispatchQueue(label: "com.yccast.video-encoder.callback")
     private var isInvalidated = false
+    private var retainedCallbackPointer: UnsafeMutableRawPointer?
 
     // Cache for headers so we can re-send them if needed
     private var cachedSPS: Data?
@@ -62,7 +76,8 @@ final class VideoEncoder: @unchecked Sendable {
         self.expectedFPS = expectedFPS
         self.keyframeThrottleInterval = max(0.3, keyframeIntervalSeconds / 3.0) // Allow forced keyframes at 1/3 the interval
         encoderQueue.setSpecific(key: encoderQueueKey, value: 1)
-        
+
+        let selfPointer = Unmanaged.passRetained(self).toOpaque()
         let status = VTCompressionSessionCreate(
             allocator: nil,
             width: Int32(width),
@@ -83,51 +98,83 @@ final class VideoEncoder: @unchecked Sendable {
                 let encoder = Unmanaged<VideoEncoder>.fromOpaque(refCon).takeUnretainedValue()
                 encoder.compressionCallback(status: status, flags: flags, sampleBuffer: sampleBuffer)
             },
-            refcon: Unmanaged.passUnretained(self).toOpaque(),
+            refcon: selfPointer,
             compressionSessionOut: &compressionSession
         )
-        
+
         if status != noErr {
             LogManager.shared.log("VideoEncoder: Failed to create session \(status)")
+            // The retained callback reference must go away with the session
+            // that was never created.
+            Unmanaged<VideoEncoder>.fromOpaque(selfPointer).release()
             return
         }
-        
+        retainedCallbackPointer = selfPointer
+
         guard let session = compressionSession else { return }
-        
-        // Configuration for Low-Latency Real-Time Encoding
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+
+        // Configuration for Low-Latency Real-Time Encoding. Failures here only
+        // degrade quality/latency, but silently: log each miss so the selected
+        // profile can be trusted in diagnostics.
+        setSessionProperty(session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue, "RealTime")
+        setSessionProperty(session, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel, "ProfileLevel")
 
         // CABAC costs a little encode time and buys roughly 10% bitrate at equal
         // quality versus CAVLC. On screen content — text, thin UI lines, large flat
         // areas — that budget goes straight into sharper edges.
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC)
+        setSessionProperty(session, kVTCompressionPropertyKey_H264EntropyMode, kVTH264EntropyMode_CABAC, "CABAC")
 
         // Emit each frame as soon as it is encoded. Anything above 0 trades
         // latency for compression efficiency, which is the wrong trade for a
         // screen the user is actively working on.
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
-        
+        setSessionProperty(session, kVTCompressionPropertyKey_MaxFrameDelayCount, 0 as CFNumber, "MaxFrameDelayCount")
+
         let bitrateCF = bitrate as CFNumber
         // DataRateLimits uses BYTES per period. Shorter windows = tighter per-frame control.
         // P2P uses 0.1s (prevents AWDL buffer bloat), infrastructure uses 1.0s (more flexible).
         let bytesPerWindow = Int(Double(bitrate / 8) * 1.5 * rateLimitWindow)
         let limitCF = [bytesPerWindow, rateLimitWindow] as CFArray
 
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrateCF)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limitCF)
-        
+        setSessionProperty(session, kVTCompressionPropertyKey_AverageBitRate, bitrateCF, "AverageBitRate")
+        setSessionProperty(session, kVTCompressionPropertyKey_DataRateLimits, limitCF, "DataRateLimits")
+
         // Keyframe Control — shorter interval = faster error recovery at cost of bandwidth
         let maxKeyFrameInterval = Int(keyframeIntervalSeconds * Double(expectedFPS))
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: maxKeyFrameInterval as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: keyframeIntervalSeconds as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse) // Crucial for Real-Time
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: expectedFPS as CFNumber)
+        setSessionProperty(session, kVTCompressionPropertyKey_MaxKeyFrameInterval, maxKeyFrameInterval as CFNumber, "MaxKeyFrameInterval")
+        setSessionProperty(session, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, keyframeIntervalSeconds as CFNumber, "MaxKeyFrameIntervalDuration")
+        setSessionProperty(session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse, "AllowFrameReordering") // Crucial for Real-Time
+        setSessionProperty(session, kVTCompressionPropertyKey_ExpectedFrameRate, expectedFPS as CFNumber, "ExpectedFrameRate")
 
         VTCompressionSessionPrepareToEncodeFrames(session)
         LogManager.shared.log("VideoEncoder: Initialized (\(bitrate/1_000_000)Mbps, KF every \(keyframeIntervalSeconds)s)")
     }
-    
+
+    /// Properties this machine's encoder has already reported as unsupported.
+    ///
+    /// `kVTPropertyNotSupportedErr` is a fixed fact about the hardware encoder,
+    /// not an event: Apple silicon's H.264 encoder rejects `MaxFrameDelayCount`
+    /// on every session. Logging it per session buried real failures in noise,
+    /// so an unsupported property is reported once per launch and a genuine
+    /// failure still logs every time.
+    private static let unsupportedPropertyLogger = VideoEncoderUnsupportedPropertyLogger()
+
+    private func setSessionProperty(_ session: VTCompressionSession, _ key: CFString, _ value: CFTypeRef, _ label: String) {
+        let status = VTSessionSetProperty(session, key: key, value: value)
+        guard status != noErr else { return }
+
+        if status == kVTPropertyNotSupportedErr {
+            let isFirstReport = Self.unsupportedPropertyLogger.insertIfNew(label)
+            guard isFirstReport else { return }
+            // Low latency does not depend on this property alone: frame
+            // reordering is already disabled and RealTime is set, so the encoder
+            // still emits each frame as it finishes.
+            LogManager.shared.log("VideoEncoder: \(label) is not supported by this hardware encoder — leaving it at the encoder default")
+            return
+        }
+
+        LogManager.shared.log("VideoEncoder: Could not set \(label) (\(status)) — output may differ from the selected profile")
+    }
+
     deinit {
         invalidate()
         LogManager.shared.log("VideoEncoder: Deallocated")
@@ -136,23 +183,27 @@ final class VideoEncoder: @unchecked Sendable {
     /// Drains in-flight frames and tears the compression session down.
     ///
     /// Idempotent and safe to call from any thread. After this returns,
-    /// VideoToolbox will not deliver further callbacks for this encoder, which is
-    /// what makes the unretained callback reference safe.
+    /// VideoToolbox will not deliver further callbacks for this encoder, which
+    /// is what makes the callback's retained reference safe to release.
     func invalidate() {
-        let session: VTCompressionSession? = syncOnEncoderQueue {
-            guard !isInvalidated else { return nil }
+        let teardown: (session: VTCompressionSession?, pointer: UnsafeMutableRawPointer?) = syncOnEncoderQueue {
+            guard !isInvalidated else { return (nil, nil) }
             isInvalidated = true
             let current = compressionSession
             compressionSession = nil
-            return current
+            let pointer = retainedCallbackPointer
+            retainedCallbackPointer = nil
+            return (current, pointer)
         }
 
-        guard let session else { return }
+        guard let session = teardown.session else { return }
         // Order matters: finish outstanding frames first, otherwise their
         // callbacks fire against a session that is already being invalidated.
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
         VTCompressionSessionInvalidate(session)
-        delegate = nil
+        if let pointer = teardown.pointer {
+            Unmanaged<VideoEncoder>.fromOpaque(pointer).release()
+        }
     }
 
     func forceKeyframe() {
@@ -337,11 +388,18 @@ final class VideoEncoder: @unchecked Sendable {
                     var lenSPS = UInt32(sps.count).bigEndian
                     coalescedData.append(Data(bytes: &lenSPS, count: 4))
                     coalescedData.append(sps)
-                    
+
                     var lenPPS = UInt32(pps.count).bigEndian
                     coalescedData.append(Data(bytes: &lenPPS, count: 4))
                     coalescedData.append(pps)
                     LogManager.shared.log("VideoEncoder: Injected Cached SPS/PPS")
+                } else {
+                    // A keyframe with no parameter sets — in band or cached — is
+                    // undecodable on the receiver. Drop it and force a fresh one
+                    // instead of shipping a black picture until the next GOP.
+                    LogManager.shared.log("VideoEncoder: Dropping keyframe without parameter sets; forcing a new keyframe")
+                    forceKeyframe()
+                    return
                 }
             }
         }
@@ -380,11 +438,16 @@ final class VideoEncoder: @unchecked Sendable {
         // 4. Send One Megapacket (with PTS Header)
         if !coalescedData.isEmpty {
              var packetWithPTS = Data()
-             // Convert PTS to UInt64 nanoseconds (8 bytes)
-             var ptsNanos = UInt64(presentationTimeStamp.seconds * 1_000_000_000)
+             // Convert PTS to UInt64 nanoseconds (8 bytes). CMTime.seconds is
+             // NaN for invalid timestamps and can exceed UInt64's range for
+             // pathological inputs; UInt64(Double) traps on both.
+             let ptsSeconds = presentationTimeStamp.seconds
+             guard ptsSeconds.isFinite, ptsSeconds >= 0,
+                   ptsSeconds * 1_000_000_000 < Double(UInt64.max) else { return }
+             var ptsNanos = UInt64(ptsSeconds * 1_000_000_000)
              packetWithPTS.append(Data(bytes: &ptsNanos, count: 8))
              packetWithPTS.append(coalescedData)
-            
+
              delegate?.videoEncoder(self, didEncode: packetWithPTS, for: connectionId, isKeyframe: isKeyframe)
         }
     }

@@ -212,12 +212,31 @@ Pairing code
 
 Special command codes in the current path:
 
-- `555` announces the receiver is entering the background; the sender holds the session and virtual display in a ~5 minute grace period with streaming paused. Any later authenticated message from the receiver ends the grace period and resumes the stream.
+- `555` announces the receiver is entering the background. iPadOS suspends the
+  app and resets its sockets about a second later, so the sender always sees a
+  fatal transport error right after the notice. The grace period is therefore
+  expressed as a **display hold**, not as a held connection: the virtual display
+  outlives its pipeline for ~5 minutes (`BackgroundDisplayHoldPolicy`), the
+  sender keeps auto-reconnecting for that whole window instead of stopping at
+  three attempts, and the next authenticated session for the same device adopts
+  the held display instead of building a new one. Adoption is mandatory —
+  WindowServer publishes at most one private virtual display at a time, so a
+  second one created alongside a held display never goes online. A hold is
+  released on adoption, on geometry mismatch, on expiry, on manual disconnect,
+  and on pairing reset.
 - `777` reports the receiver's full screen dimensions to the sender.
 - `888` is heartbeat.
 - `999` requests a keyframe.
 
-Do not add unauthenticated control messages. If a receiver sends data back to the Mac after pairing, it should go through the authenticated envelope flow.
+Do not add unauthenticated control messages — in either direction. Protocol v4
+seals ALL control traffic in authenticated envelopes: receiver→sender events
+ride JSON envelopes on the media/control transport, and sender→receiver
+control (media heartbeat `0x04`, disconnect notice `0x03`) rides type byte
+`0x05` + envelope. Bare control type bytes are rejected by the receiver. All
+envelope receivers enforce per-transport monotonic sequence numbers (replay
+protection). Both handshake directions carry and enforce the protocol version
+(`SenderHello.version`, `ReceiverHello.version`); see
+`docs/decisions/ADR-008-authenticated-sender-control-protocol-v4.md`.
 
 ## Current Behavior Constraints
 

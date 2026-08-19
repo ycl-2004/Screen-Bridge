@@ -89,10 +89,21 @@ final class VirtualDisplayManager: @unchecked Sendable {
     /// Number of distinct identities tried before giving up.
     private static let maximumIdentityAttempts = 3
 
-    private var activeDisplay: Any?
-    private(set) var displayID: CGDirectDisplayID?
+    /// `activeDisplay`/`displayID` are read from the main thread's deferred
+    /// callbacks while `destroyDisplay()` may run elsewhere, so access goes
+    /// through this lock instead of relying on the previous unsynchronized
+    /// stored properties.
+    private let stateLock = NSLock()
+    private var activeDisplayStorage: Any?
+    private var displayIDStorage: CGDirectDisplayID?
+    private var isCreatingDisplay = false
+
+    var displayID: CGDirectDisplayID? {
+        stateLock.withLock { displayIDStorage }
+    }
+
     var onDisplayBoundsChanged: ((CGRect) -> Void)?
-    
+
     /// Creates a virtual display with the specified resolution
     /// - Returns: The CGDirectDisplayID of the created virtual display, or nil if creation failed
     func createDisplay(resolution: Resolution, placement: DisplayPlacement = .right) -> CGDirectDisplayID? {
@@ -105,7 +116,7 @@ final class VirtualDisplayManager: @unchecked Sendable {
             placement: placement
         )
     }
-    
+
     /// Creates a virtual display with custom parameters.
     ///
     /// Creation is only half the job: WindowServer can hand back a display
@@ -114,6 +125,20 @@ final class VirtualDisplayManager: @unchecked Sendable {
     /// cannot move windows onto it, so it is treated as a failure and retried
     /// under a fresh identity rather than returned as if it worked.
     func createDisplay(width: Int, height: Int, ppi: Int, hiDPI: Bool, name: String, placement: DisplayPlacement = .right) -> CGDirectDisplayID? {
+        // `waitOnePollInterval` services the main runloop while waiting for
+        // WindowServer, so debounced UI callbacks can re-enter this method in
+        // the middle of the (up to ~8s) creation. A nested create would fight
+        // the outer one for WindowServer's single virtual-display slot.
+        guard stateLock.withLock({ () -> Bool in
+            guard !isCreatingDisplay else { return false }
+            isCreatingDisplay = true
+            return true
+        }) else {
+            LogManager.shared.log("VirtualDisplayManager: Refusing nested createDisplay while another creation is in flight")
+            return nil
+        }
+        defer { stateLock.withLock { isCreatingDisplay = false } }
+
         // WindowServer publishes at most one of these private virtual displays
         // at a time: while an earlier one is still alive, every new display is
         // created successfully but silently never goes online. Reconnecting
@@ -148,8 +173,10 @@ final class VirtualDisplayManager: @unchecked Sendable {
             }
 
             if waitUntilOnline(displayIDValue) {
-                activeDisplay = created
-                self.displayID = displayIDValue
+                stateLock.withLock {
+                    activeDisplayStorage = created
+                    displayIDStorage = displayIDValue
+                }
                 LogManager.shared.log("VirtualDisplayManager: Created virtual display with ID \(displayIDValue) (serial \(serial), attempt \(attempt))")
                 schedulePlacement(for: displayIDValue, placement: placement)
                 return displayIDValue
@@ -221,9 +248,12 @@ final class VirtualDisplayManager: @unchecked Sendable {
     /// online. Reconnect immediately follows disconnect, so this waits for the
     /// withdrawal to actually land.
     func destroyDisplay() {
-        let retiringID = displayID
-        activeDisplay = nil
-        displayID = nil
+        let retiringID = stateLock.withLock { () -> CGDirectDisplayID? in
+            let id = displayIDStorage
+            activeDisplayStorage = nil
+            displayIDStorage = nil
+            return id
+        }
 
         guard let retiringID else { return }
         let wentOffline = waitUntilOffline(retiringID)
@@ -409,7 +439,16 @@ final class VirtualDisplayManager: @unchecked Sendable {
         var displayCount: UInt32 = 0
         var displays = [CGDirectDisplayID](repeating: 0, count: 16)
 
-        guard CGGetOnlineDisplayList(UInt32(displays.count), &displays, &displayCount) == .success else {
+        var status = CGGetOnlineDisplayList(UInt32(displays.count), &displays, &displayCount)
+        if status == .success && displayCount > UInt32(displays.count) {
+            // More online displays than the fixed buffer could hold. Growing the
+            // buffer to the reported count keeps large desktops from being
+            // silently truncated (a truncated list made the virtual display look
+            // offline and triggered pointless identity rotation).
+            displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+            status = CGGetOnlineDisplayList(UInt32(displays.count), &displays, &displayCount)
+        }
+        guard status == .success else {
             return []
         }
 

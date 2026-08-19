@@ -16,6 +16,49 @@ final class ConnectionRetryPolicyTests: XCTestCase {
         XCTAssertGreaterThan(ConnectionRetryPolicy.backoffSeconds, 0)
     }
 
+    // MARK: - Auto route budget
+    //
+    // Auto walks cable, Wi-Fi, AWDL, then an unscoped attempt. With a full AWDL
+    // warm-up budget on every candidate the worst case ran past a minute of
+    // "Connecting…" before anything was reported.
+
+    /// An explicit AWDL request is waiting on that radio and nothing else, so it
+    /// keeps the full warm-up budget.
+    func testExplicitAWDLKeepsFullWarmUpBudget() {
+        XCTAssertEqual(
+            ConnectionRetryPolicy.awdlAttemptBudget(isExplicitAWDLRequest: true),
+            ConnectionRetryPolicy.maximumAWDLAttempts
+        )
+    }
+
+    /// In Auto, AWDL is one candidate among several; spending the full budget
+    /// there delays every remaining route behind it.
+    func testAutoSpendsLessOnAWDLThanAnExplicitRequest() {
+        let autoBudget = ConnectionRetryPolicy.awdlAttemptBudget(isExplicitAWDLRequest: false)
+        XCTAssertGreaterThanOrEqual(autoBudget, 1)
+        XCTAssertLessThan(autoBudget, ConnectionRetryPolicy.maximumAWDLAttempts)
+    }
+
+    /// The budget is measured from the start of the chain, not from the current
+    /// candidate, so extra interfaces cannot stretch one connect indefinitely.
+    func testAutoBudgetIsMeasuredFromTheStartOfTheChain() {
+        let start = Date()
+        XCTAssertTrue(ConnectionRetryPolicy.hasAutomaticRouteBudgetRemaining(
+            chainStartedAt: start,
+            now: start.addingTimeInterval(5)
+        ))
+        XCTAssertFalse(ConnectionRetryPolicy.hasAutomaticRouteBudgetRemaining(
+            chainStartedAt: start,
+            now: start.addingTimeInterval(ConnectionRetryPolicy.automaticRouteBudgetSeconds + 1)
+        ))
+    }
+
+    /// The bound has to be short enough to read as a search rather than a hang.
+    func testAutoBudgetStaysUnderAMinute() {
+        XCTAssertLessThan(ConnectionRetryPolicy.automaticRouteBudgetSeconds, 60)
+        XCTAssertGreaterThan(ConnectionRetryPolicy.automaticRouteBudgetSeconds, 10)
+    }
+
     // MARK: - Reservation ownership
     //
     // Releasing the per-device reservation one step too early let a second,
@@ -45,6 +88,18 @@ final class ConnectionRetryPolicyTests: XCTestCase {
                 "retry \(attempt) must proceed"
             )
         }
+    }
+
+    /// Auto route fallback is a continuation of the same user action and must
+    /// keep the reservation while it advances to the next discovered interface.
+    func testAutoFallbackIsNeverRejectedByItsOwnReservation() {
+        XCTAssertTrue(
+            ConnectionRetryPolicy.shouldAcceptConnect(
+                attempt: 1,
+                fallbackIndex: 1,
+                hasReservation: true
+            )
+        )
     }
 
     /// The retry path cancels the connection itself; releasing the reservation

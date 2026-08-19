@@ -1,5 +1,16 @@
 import Foundation
 
+/// Single source of truth for the PCM/AAC format on the wire.
+///
+/// The bare AAC payloads carry no in-band sample rate, so the receiver decodes
+/// at whatever rate it declares locally — both ends must agree out-of-band.
+/// Keeping the numbers in one shared place makes a future protocol revision
+/// (rate in the packet header) a one-file change.
+public enum AudioStreamFormat {
+    public static let sampleRate: Double = 48_000
+    public static let channelCount: UInt32 = 2
+}
+
 public enum AudioCodec: UInt8, Equatable, Sendable {
     case aacLC = 1
 }
@@ -360,6 +371,11 @@ public struct AudioJitterBufferState: Equatable, Sendable {
 
     public private(set) var pendingBuffers = 0
     public private(set) var isPlaying = false
+    /// Invalidates completion callbacks from buffers scheduled before a reset.
+    /// AVAudioPlayerNode invokes outstanding callbacks when it is stopped, so a
+    /// reconnect must not let the previous session drain the new session's
+    /// accounting.
+    public private(set) var playbackGeneration: UInt64 = 0
 
     public init() {}
 
@@ -380,7 +396,8 @@ public struct AudioJitterBufferState: Equatable, Sendable {
 
     /// Returns true when playback exhausted the queue and must rebuffer.
     @discardableResult
-    public mutating func bufferCompleted() -> Bool {
+    public mutating func bufferCompleted(scheduledIn generation: UInt64) -> Bool {
+        guard generation == playbackGeneration else { return false }
         pendingBuffers = max(pendingBuffers - 1, 0)
         guard isPlaying, pendingBuffers == 0 else { return false }
         isPlaying = false
@@ -388,6 +405,7 @@ public struct AudioJitterBufferState: Equatable, Sendable {
     }
 
     public mutating func reset() {
+        playbackGeneration &+= 1
         pendingBuffers = 0
         isPlaying = false
     }

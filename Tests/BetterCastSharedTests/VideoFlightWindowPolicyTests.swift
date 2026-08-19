@@ -46,4 +46,32 @@ final class VideoFlightWindowPolicyTests: XCTestCase {
         XCTAssertLessThanOrEqual(VideoFlightWindowPolicy.reliableLinkWindow, 8)
         XCTAssertGreaterThanOrEqual(VideoFlightWindowPolicy.sharedLinkWindow, 1)
     }
+
+    func testVideoTransferRateUsesActualElapsedTime() {
+        XCTAssertEqual(
+            VideoTransferRatePolicy.megabitsPerSecond(
+                byteCount: 250_000,
+                elapsedSeconds: 2
+            ),
+            1.0,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testVideoTransferRateRejectsInvalidIntervals() {
+        XCTAssertEqual(
+            VideoTransferRatePolicy.megabitsPerSecond(
+                byteCount: 250_000,
+                elapsedSeconds: 0
+            ),
+            0
+        )
+        XCTAssertEqual(
+            VideoTransferRatePolicy.megabitsPerSecond(
+                byteCount: 250_000,
+                elapsedSeconds: .infinity
+            ),
+            0
+        )
+    }
 }

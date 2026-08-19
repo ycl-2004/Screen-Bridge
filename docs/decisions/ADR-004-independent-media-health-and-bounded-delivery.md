@@ -25,6 +25,11 @@ into seconds of latency.
 - A session fails with a specific transport, first-frame, decoder, or renderer
   reason. Once a frame has rendered, a fresh heartbeat keeps an unchanged
   desktop healthy.
+- Decoder and renderer stall detection becomes eligible only after that stage
+  has completed at least one frame. During startup, the first-frame deadline is
+  authoritative; `.distantPast` initialization sentinels must not turn the
+  normal first access-unit → decode → main-thread render handoff into an
+  immediate false stall.
 - Screen capture accepts only valid sample buffers whose ScreenCaptureKit frame
   status is `complete`.
 - Shared infrastructure paths permit two in-flight video packets. Verified
@@ -43,9 +48,19 @@ into seconds of latency.
   caps decoded audio at ten buffers, and returns to buffering whenever playback
   drains to zero. Its AudioSession requests 48 kHz and a 10 ms hardware buffer
   before activation, then records the values iOS actually granted.
+- Receiver queue depth retires a decoded buffer only from
+  `AVAudioPlayerNodeCompletionDataRendered`. The convenience `scheduleBuffer`
+  completion is equivalent to `dataConsumed`, which Apple documents may run
+  before rendering begins or before the buffer has completely played. Each
+  playback reset also advances a generation so delayed completions from a
+  stopped engine cannot consume buffers scheduled by a later connection.
 - Send-completion latency and bounded-queue drops feed a pure adaptive bitrate
   policy. The user-selected quality is the upper bound and 5 Mbps is the normal
   lower bound.
+- The sender reports **Video Throughput** from compressed video bytes admitted
+  to the Network.framework send window divided by the actual elapsed sampling
+  interval. It is an aggregate application-delivery rate across displays, not
+  physical link capacity and not an audio/control traffic counter.
 - Audio owns a separate authenticated transport. Chrome process changes or
   auxiliary transport failures rebuild only that audio branch; they never
   rebuild the virtual display or change the receiver's global video state.
@@ -61,9 +76,24 @@ when a nominally fast direct route stalls. Congestion may reduce temporary
 picture quality or drop motion frames, which is an intentional trade for keeping
 the newest screen state responsive.
 
+The first-frame deadline still tears down a session that never renders, but a
+freshly authenticated session is not judged by steady-state decoder/renderer
+stall rules until those stages have first demonstrated progress. This removes a
+startup race without weakening established-session stall detection.
+
 The health, bitrate, audio FIFO, timed-packet framing, sequence tracking, and
 jitter-buffer transitions are pure and covered by shared tests. Audio now pays
 about 107 ms of startup/recovery buffering and can accumulate at most about
 171 ms on the sender; that bounded latency is the explicit trade for continuity.
-Real-device validation is still required to tune thresholds across AWDL,
-router Wi-Fi, and cable paths.
+Rendered-completion accounting removes false queue depletion without enlarging
+that fixed jitter buffer or reducing audio quality. Generation isolation makes
+stop/reconnect callbacks harmless. The throughput display remains useful for
+relative workload observation but does not imply link speed or stability.
+
+Apple API contracts used for the receiver accounting:
+
+- https://developer.apple.com/documentation/avfaudio/avaudioplayernode/schedulebuffer(_:completioncallbacktype:completionhandler:)
+- https://developer.apple.com/documentation/avfaudio/avaudioplayernodecompletioncallbacktype/datarendered
+
+Real-device validation is still required after playback-policy changes and to
+tune thresholds across AWDL, router Wi-Fi, and cable paths.

@@ -35,6 +35,13 @@ final class AudioEncoder: @unchecked Sendable {
     private var inputFramesNeededForAACPacket = Int(BCConstants.aacFrameSize)
     private var converterInputOffset = 0
     private var converterInputBytesConsumed = 0
+    private var hasLoggedConcurrentEncode = false
+
+    /// Encode is owned by exactly one queue (the tap's IO callback queue).
+    /// The accumulator and converter state are manually managed, so a second
+    /// concurrent caller would corrupt them. Contend-detect and drop rather
+    /// than block a realtime audio thread.
+    private let encodeLock = NSLock()
 
     init(connectionId: UUID) {
         self.connectionId = connectionId
@@ -86,6 +93,15 @@ final class AudioEncoder: @unchecked Sendable {
         sourceFormat srcFormat: AudioStreamBasicDescription,
         inputTime: AudioTimeStamp? = nil
     ) {
+        guard encodeLock.try() else {
+            if !hasLoggedConcurrentEncode {
+                hasLoggedConcurrentEncode = true
+                LogManager.shared.log("AudioEncoder: Dropped audio delivered from a second concurrent caller")
+            }
+            return
+        }
+        defer { encodeLock.unlock() }
+
         let isFloatPCM = srcFormat.mFormatID == kAudioFormatLinearPCM
             && (srcFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0
             && srcFormat.mBitsPerChannel == 32
@@ -99,6 +115,16 @@ final class AudioEncoder: @unchecked Sendable {
                 )
             }
             return
+        }
+
+        // A converter built for a different source rate pitch-shifts every
+        // packet after the output device switches (e.g. 44.1 kHz ↔ 48 kHz).
+        // Rebuild it and drop the stale buffered PCM instead.
+        if let inputFormat, inputFormat.mSampleRate != srcFormat.mSampleRate {
+            LogManager.shared.log(
+                "AudioEncoder: Source rate changed \(Int(inputFormat.mSampleRate))Hz -> \(Int(srcFormat.mSampleRate))Hz; rebuilding converter"
+            )
+            disposeConverterAndBuffers()
         }
 
         // Initialize converter on first audio frame
@@ -370,6 +396,21 @@ final class AudioEncoder: @unchecked Sendable {
                 + "nonInterleaved=\(isNonInterleaved), flags=0x\(String(sourceFormat.mFormatFlags, radix: 16)); "
                 + "output=AAC-LC \(Int(BCConstants.audioSampleRate))Hz stereo \(BCConstants.aacBitrate / 1_000)kbps"
         )
+    }
+
+    private func disposeConverterAndBuffers() {
+        if let converter = converter {
+            AudioConverterDispose(converter)
+        }
+        aacOutputBuffer?.deallocate()
+        aacOutputBuffer = nil
+        converter = nil
+        inputFormat = nil
+        outputFormat = nil
+        pcmAccumulator.removeAll()
+        pcmAccumulatorStartSampleTime = nil
+        converterInputOffset = 0
+        converterInputBytesConsumed = 0
     }
 
     deinit {

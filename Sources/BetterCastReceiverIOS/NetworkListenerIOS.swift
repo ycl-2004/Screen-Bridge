@@ -345,6 +345,11 @@ final class NetworkListenerIOS: @unchecked Sendable {
         let sessionKey: Data
     }
 
+    /// Replay protection for sender→receiver control envelopes, per transport.
+    private var senderControlSequence: [ObjectIdentifier: UInt64] = [:]
+    /// Deduplicates the bare-control-rejection log.
+    private var hasLoggedBareControlRejection = false
+
     private func handleNewConnection(_ connection: NWConnection, type: String) {
         let connectionID = ObjectIdentifier(connection)
         if pendingConnections.count >= Self.maxPendingHandshakes {
@@ -463,6 +468,7 @@ final class NetworkListenerIOS: @unchecked Sendable {
             inputSequence = 0
             lastKeyframeRequest = .distantPast
             pendingLossNotification = false
+            hasLoggedBareControlRejection = false
             notifyState(.connected, "Connected")
             LogManager.shared.log("ReceiverIOS: Media session \(authenticated.sessionID) authenticated")
             return true
@@ -493,6 +499,7 @@ final class NetworkListenerIOS: @unchecked Sendable {
         let connectionID = ObjectIdentifier(connection)
         connectionFormat.removeValue(forKey: connectionID)
         connectionSessionKeys.removeValue(forKey: connectionID)
+        senderControlSequence.removeValue(forKey: connectionID)
     }
 
     private func removeConnection(_ connection: NWConnection) {
@@ -787,7 +794,7 @@ final class NetworkListenerIOS: @unchecked Sendable {
 
         // Auto-detect framing on first frame
         if connectionFormat[connId] == nil {
-            if firstByte == 0x01 || firstByte == 0x02 || firstByte == 0x03 || firstByte == 0x04 {
+            if StreamFraming.SenderControlTypeByte.isFramingMarker(firstByte) {
                 connectionFormat[connId] = true
                 LogManager.shared.log("ReceiverIOS: Detected type-byte framing (desktop sender)")
             } else {
@@ -797,29 +804,87 @@ final class NetworkListenerIOS: @unchecked Sendable {
         }
 
         if connectionFormat[connId] == true {
-            // Type-byte framing: [0x01=video | 0x02=audio][payload]
+            // Type-byte framing: [0x01=video | 0x02=audio | 0x05=authenticated control][payload]
             let payload = body.dropFirst(1)
-            if firstByte == 0x01 {
+            switch firstByte {
+            case StreamFraming.SenderControlTypeByte.video:
                 lastMediaHeartbeat = Date()
                 lastVideoAccessUnitReceived = Date()
                 videoDecoder?.decode(data: payload)
-            } else if firstByte == 0x02 {
+            case StreamFraming.SenderControlTypeByte.audio:
                 do {
                     audioPlayer?.decode(packet: try FramedAudioPacket.decode(Data(payload)))
                 } catch {
                     LogManager.shared.log("ReceiverIOS: Rejected malformed audio packet: \(error)")
                 }
-            } else if firstByte == 0x03 {
-                LogManager.shared.log("ReceiverIOS: Sender stopped sharing")
-                removeConnection(connection)
-            } else if firstByte == 0x04 {
-                lastMediaHeartbeat = Date()
+            case StreamFraming.SenderControlTypeByte.authenticatedControl:
+                handleAuthenticatedControlFrame(Data(payload), on: connection)
+            case StreamFraming.SenderControlTypeByte.disconnectCommand,
+                 StreamFraming.SenderControlTypeByte.heartbeatCommand:
+                // Protocol v4 seals sender control in 0x05 envelopes. A bare
+                // 0x03/0x04 byte is an on-path forgery (or a stale peer); it
+                // gets no effect either way.
+                if !hasLoggedBareControlRejection {
+                    hasLoggedBareControlRejection = true
+                    LogManager.shared.log("ReceiverIOS: Ignored unauthenticated bare control byte 0x\(String(firstByte, radix: 16)) — sender control must arrive sealed (0x05)")
+                }
+            default:
+                LogManager.shared.log("ReceiverIOS: Unknown type byte 0x\(String(firstByte, radix: 16)) — ignoring frame")
             }
         } else {
             // Legacy framing: raw video data (with 8-byte PTS prefix handled by decoder)
             lastMediaHeartbeat = Date()
             lastVideoAccessUnitReceived = Date()
             videoDecoder?.decode(data: body)
+        }
+    }
+
+    /// Sender→receiver control (heartbeat, disconnect notice) sealed in an
+    /// authenticated envelope. Anything that fails MAC verification, replay
+    /// protection, or decoding closes the transport: a peer that cannot seal
+    /// control frames correctly is not the paired sender.
+    private func handleAuthenticatedControlFrame(_ payload: Data, on connection: NWConnection) {
+        let connId = ObjectIdentifier(connection)
+        guard let sessionKey = connectionSessionKeys[connId] else {
+            connection.cancel()
+            return
+        }
+
+        let envelope: AuthenticatedEnvelope
+        let inner: Data
+        do {
+            envelope = try JSONDecoder().decode(AuthenticatedEnvelope.self, from: payload)
+            inner = try envelope.verifiedPayload(
+                sessionKey: sessionKey,
+                direction: .senderToReceiver
+            )
+        } catch {
+            LogManager.shared.log("ReceiverIOS: Rejected unauthenticated sender control message — closing connection")
+            removeConnection(connection)
+            return
+        }
+
+        guard envelope.sequence > senderControlSequence[connId, default: 0] else {
+            LogManager.shared.log("ReceiverIOS: Ignored replayed sender control envelope")
+            return
+        }
+        guard inner.count == 1, let command = inner.first,
+              command == StreamFraming.SenderControlTypeByte.heartbeatCommand
+                || command == StreamFraming.SenderControlTypeByte.disconnectCommand else {
+            LogManager.shared.log("ReceiverIOS: Rejected unknown authenticated sender control payload")
+            removeConnection(connection)
+            return
+        }
+        senderControlSequence[connId] = envelope.sequence
+
+        switch command {
+        case StreamFraming.SenderControlTypeByte.heartbeatCommand:
+            lastMediaHeartbeat = Date()
+        case StreamFraming.SenderControlTypeByte.disconnectCommand:
+            LogManager.shared.log("ReceiverIOS: Sender stopped sharing")
+            removeConnection(connection)
+        default:
+            break
         }
     }
     
@@ -953,7 +1018,8 @@ final class NetworkListenerIOS: @unchecked Sendable {
         let envelope = AuthenticatedEnvelope.seal(
             sequence: inputSequence,
             payload: payload,
-            sessionKey: sessionKey
+            sessionKey: sessionKey,
+            direction: .receiverToSender
         )
         guard let data = try? JSONEncoder().encode(envelope) else { return }
 

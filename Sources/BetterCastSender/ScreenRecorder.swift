@@ -98,9 +98,17 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                  // Use CGMainDisplayID to ensure we get the primary screen, not just 'first'
                  let mainID = CGMainDisplayID()
                  display = content.displays.first { $0.displayID == mainID }
-                 
-                 // Ultimate fallback
-                 if display == nil { display = content.displays.first }
+
+                 if display == nil {
+                     // No arbitrary `displays.first`: capturing whatever happens
+                     // to be first would silently stream the wrong screen — the
+                     // exact wrong-screen privacy failure this pipeline refuses
+                     // everywhere else.
+                     let reason = "Primary display was not available to capture"
+                     LogManager.shared.log("ScreenRecorder: \(reason)")
+                     delegate?.screenRecorderDidFailToStart(self, reason: reason)
+                     return
+                 }
             }
             
             guard let display = display else {
@@ -247,7 +255,17 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     // SCStreamDelegate
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         LogManager.shared.log("ScreenRecorder: Stream stopped with error: \(error.localizedDescription)")
-        let stoppedIntentionally = stateLock.withLock { isStopRequested }
+        // SCStream retains its registered outputs, so the recorder (and through
+        // it the encoder) outlives its owner exactly as long as `self.stream`
+        // points back at the SCStream. stopCapture() already clears that on the
+        // intentional path; clear it here too, or an owner that simply drops
+        // the recorder after an unexpected stop leaks the whole capture
+        // pipeline — capture running and screen-recording indicator lit.
+        let stoppedIntentionally = stateLock.withLock { () -> Bool in
+            let intentional = isStopRequested
+            self.stream = nil
+            return intentional
+        }
         if !stoppedIntentionally {
             delegate?.screenRecorderDidStopUnexpectedly(self)
         }

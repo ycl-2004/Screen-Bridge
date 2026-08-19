@@ -67,6 +67,23 @@ final class MediaLivenessEvaluatorTests: XCTestCase {
         )
     }
 
+    /// The first access unit can arrive just before the decoder callback. The
+    /// `.distantPast` sentinel is initialization state, not evidence that an
+    /// established decoder has stopped making progress.
+    func testFirstAccessUnitAwaitingFirstDecodeStaysHealthy() {
+        let snapshot = makeSnapshot(
+            heartbeat: now,
+            accessUnit: now.addingTimeInterval(-1),
+            decoded: .distantPast,
+            rendered: .distantPast,
+            hasDecoded: false,
+            hasRendered: false,
+            sessionStarted: now.addingTimeInterval(-1)
+        )
+
+        XCTAssertNil(MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout))
+    }
+
     func testDecodedFrameDoesNotMaskRendererStall() {
         let snapshot = makeSnapshot(
             heartbeat: now,
@@ -81,6 +98,23 @@ final class MediaLivenessEvaluatorTests: XCTestCase {
             MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout),
             .rendererStalled
         )
+    }
+
+    /// Decode completion is delivered before the first frame reaches the main
+    /// render queue. Until one frame has rendered, the first-frame deadline is
+    /// the authority and this short handoff must not tear down the connection.
+    func testFirstDecodedFrameAwaitingFirstRenderStaysHealthy() {
+        let snapshot = makeSnapshot(
+            heartbeat: now,
+            accessUnit: now.addingTimeInterval(-1),
+            decoded: now,
+            rendered: .distantPast,
+            hasDecoded: true,
+            hasRendered: false,
+            sessionStarted: now.addingTimeInterval(-1)
+        )
+
+        XCTAssertNil(MediaLivenessEvaluator.failure(for: snapshot, now: now, timeout: timeout))
     }
 
     /// A static extended desktop produces no new frames at all. The last access
