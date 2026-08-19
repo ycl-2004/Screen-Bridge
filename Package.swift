@@ -13,6 +13,7 @@ let package = Package(
         .executable(name: "BetterCastSender", targets: ["BetterCastSender"]),
         .executable(name: "BetterCastReceiverIOS", targets: ["BetterCastReceiverIOS"]),
         .library(name: "BetterCastShared", targets: ["BetterCastShared"]),
+        .library(name: "BetterCastSenderSupport", targets: ["BetterCastSenderSupport"]),
     ],
     targets: [
         .target(
@@ -36,9 +37,16 @@ let package = Package(
                 .linkedFramework("IOSurface")
             ]
         ),
+        .target(
+            name: "BetterCastSenderSupport",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("CoreAudio")
+            ]
+        ),
         .executableTarget(
             name: "BetterCastSender",
-            dependencies: ["VirtualDisplayLib", "BetterCastShared"],
+            dependencies: ["VirtualDisplayLib", "BetterCastShared", "BetterCastSenderSupport"],
             exclude: ["VirtualDisplay"],
             linkerSettings: [
                 .linkedFramework("ScreenCaptureKit"),
@@ -68,6 +76,10 @@ let package = Package(
         .testTarget(
             name: "BetterCastSharedTests",
             dependencies: ["BetterCastShared"]
+        ),
+        .testTarget(
+            name: "BetterCastSenderSupportTests",
+            dependencies: ["BetterCastSenderSupport"]
         ),
     ]
 )

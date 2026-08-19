@@ -64,7 +64,7 @@ cd Screen-Bridge
 5. Choose `Auto`, `Require Cable`, `AWDL`, or `Wi-Fi` according to the path you
    want to use. Strict modes never silently fall back to another interface.
 6. Grant **Screen Recording** when macOS asks. Grant **Audio Recording** only
-   when Chrome audio routing is enabled.
+   when routing selected app audio to a receiver.
 
 ### iPad
 
@@ -81,7 +81,8 @@ cd Screen-Bridge
 - iPadOS 13.0 or later for the receiver target.
 - A Mac and iPad that can reach each other through a local Apple network path.
 - Screen Recording permission on the Mac for display capture.
-- Audio Recording permission only when optional Chrome audio routing is used.
+- macOS 14.2 or later and Audio Recording permission when per-app audio routing
+  is used. Display-only streaming still supports macOS 14.0 or later.
 - An Apple signing identity and provisioning profile for a real-device iPad
   install or a distributable build.
 
@@ -122,10 +123,16 @@ cd Screen-Bridge
 
 **Optional audio**
 
-- Routes selected Chrome audio to the iPad when the required permission is
-  granted.
+- Detects apps that are currently producing audio and lets each app route to
+  This Mac or one connected receiver from that device's Audio section.
+- Persists app-to-device choices and resumes a selected route when the app or
+  receiver returns.
 - Shows waiting, connecting, streaming, retry, and failure states.
-- Recovers the audio path when Chrome restarts or its audio processes change.
+- Recovers the audio path when a selected app restarts or replaces helper
+  processes.
+- Starts the muted process tap only after the dedicated receiver connection is
+  authenticated. Backgrounding, disconnecting, or losing that transport stops
+  the tap immediately so audio returns to the Mac.
 - Keeps up to eight AAC packets in a FIFO on its dedicated TCP sender; a full
   queue drops the oldest waiting packet instead of overwriting every packet
   that arrives during a send.
@@ -153,7 +160,7 @@ cd Screen-Bridge
 5. The iPad decodes and renders the display, while authenticated control
    messages report screen size, heartbeat, and keyframe requests.
 
-The media/control transport and optional Chrome-audio transport have explicit
+The media/control transport and optional per-app audio transport have explicit
 roles under one receiver-created session. The wire protocol is version 4:
 audio packets carry sequence, sample time, sample count, codec, and flags, and
 every control message in **both** directions — including the sender's media
@@ -276,8 +283,9 @@ local to the Mac.
 <summary>Why does Screen Bridge ask for Screen Recording?</summary>
 
 The Mac must capture the virtual display before it can encode and stream it.
-Audio Recording is requested only when optional Chrome audio routing is turned
-on. Accessibility is not required for the display-only workflow.
+Audio Recording is requested only when at least one app is routed to a receiver.
+Microphone and Accessibility permissions are not required for the display-only
+or app-audio workflows.
 
 </details>
 
@@ -384,12 +392,16 @@ public distribution solution.
 
 - `Sources/BetterCastSender/` — macOS sender UI, discovery, pairing, virtual
   display, capture, encoding, and stream orchestration.
+- `Sources/BetterCastSenderSupport/` — dynamic Core Audio app discovery,
+  helper-process ownership, route persistence models, and audio readiness policy.
 - `Sources/BetterCastReceiverIOS/` — iPad listener, pairing, decode, render,
   audio playback, and receiver lifecycle.
 - `Sources/BetterCastShared/` — shared protocol constants, pairing, framing,
   session policies, liveness, and adaptive bitrate decisions.
 - `Tests/BetterCastSharedTests/` — shared authentication, framing, lifecycle,
   and policy regression tests.
+- `Tests/BetterCastSenderSupportTests/` — audio app grouping, per-device route,
+  persistence, and local-fallback policy tests.
 - `BetterCastIOS.xcodeproj/` — iPad Xcode project and signing/build settings.
 - `make_app.sh` — Mac app and DMG build script.
 - `package_ios_ipa.sh` — signed iOS archive/export packaging script.
@@ -411,10 +423,20 @@ states and are not the current product release.
 
 ## Verification status
 
-The shared test suite currently covers pairing, Keychain storage, framing,
-AVCC parsing, session roles, reconnect policy, media liveness, bounded video
-delivery, timed audio packets, the sender FIFO, and receiver rebuffering. The
-current worktree run completed `129/129` tests with 0 failures.
+The test suite currently covers pairing, Keychain storage, framing, AVCC
+parsing, session roles, reconnect policy, media liveness, bounded video
+delivery, timed audio packets, the sender FIFO, receiver rebuffering, dynamic
+audio-app ownership, per-device route persistence, and local-audio fallback.
+The current worktree run completed `136/136` tests with 0 failures.
+
+The 2026-08-19 per-app routing worktree also passed strict concurrency with
+warnings treated as errors, built an unsigned generic iOS receiver target, and
+built, signed, installed, and launched a universal Mac app. A live Core Audio
+catalog check while Chrome and Safari played simultaneously resolved them as
+`com.google.Chrome` and `com.apple.Safari`; the check exposed and then verified
+the fix for Safari initially appearing as the shared `com.apple.WebKit.GPU`
+helper. End-to-end selected-app playback on the receiver and Spotify remain in
+the manual evidence boundary below.
 
 The 2026-08-19 device check also built, signed, installed, and launched the
 receiver on an iPad Air 5 running iPadOS 15.7. The signed Mac app discovered
@@ -454,7 +476,7 @@ The following remain outside the current automated evidence boundary:
 - Backgrounding a real iPad and confirming that windows stay on the extended
   display while the Mac holds and re-adopts the virtual display
   (`docs/decisions/ADR-009`).
-- Long-duration Chrome audio recovery after app/process churn, plus
+- Long-duration selected-app audio recovery after app/process churn, plus
   physical-link identity beyond what Network.framework's interface evidence
   can prove.
 - Signed IPA installation and Developer ID/notarized Mac distribution.

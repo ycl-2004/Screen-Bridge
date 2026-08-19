@@ -96,7 +96,7 @@ Other sender files:
 - `VirtualDisplayManager.swift` and `VirtualDisplay/` create/manage the macOS virtual display.
 - `ScreenRecorder.swift` captures the selected display through ScreenCaptureKit.
 - `VideoEncoder.swift` encodes video.
-- `AudioEncoder.swift` and `ProcessAudioTapCapture.swift` handle optional Chrome audio routing.
+- `BetterCastSenderSupport/AudioApplicationCatalog.swift` discovers active audio apps and stores per-device routes. `AudioEncoder.swift` and `ProcessAudioTapCapture.swift` capture the selected app set only after the receiver's dedicated audio transport authenticates.
 - `InputHandler.swift` only stores each connection's virtual-display bounds. The name is historical; it handles no input, and the Mac-to-iPad path is display-only.
 
 Build local Mac app/DMG:

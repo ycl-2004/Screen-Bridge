@@ -4,6 +4,7 @@ import SwiftUI
 import Security
 import ScreenCaptureKit
 import BetterCastShared
+import BetterCastSenderSupport
 
 
 @main
@@ -1054,11 +1055,6 @@ struct DetailPanelView: View {
                     InfoTip(text: "Uses HiDPI for sharper text. Best Fit already includes it.")
                 }
 
-                HStack {
-                    Toggle("Chrome Audio to iPad", isOn: $client.audioStreamingEnabled)
-                    InfoTip(text: "Streams Chrome audio to the iPad and mutes it on this Mac.")
-                }
-
                 Button("Arrange Displays") {
                     client.openDisplaySettings()
                 }
@@ -1146,7 +1142,7 @@ struct DetailPanelView: View {
                         Text("Private TCP only")
                             .foregroundStyle(.secondary)
                     }
-                    InfoTip(text: "Video and control use one private TCP stream. Chrome audio uses a second authenticated stream.")
+                    InfoTip(text: "Video and control use one private TCP stream. Routed app audio uses a second authenticated stream.")
                 }
 
                 HStack {
@@ -1888,22 +1884,9 @@ struct DeviceDetailView: View {
                     InfoTip(text: "Higher bitrate reduces compression. Native Max needs a strong direct connection.")
                 }
 
-                HStack {
-                    Toggle("Chrome Audio to iPad", isOn: Binding(
-                        get: { display.audioEnabled },
-                        set: { client.setAudioEnabled($0, for: display.id) }
-                    ))
-                    InfoTip(text: "Streams Chrome audio to this iPad and mutes it on this Mac.")
-                }
-
-                if display.audioEnabled {
-                    LabeledContent("Audio Status") {
-                        Label(display.audioState.label, systemImage: display.audioState.symbolName)
-                            .foregroundStyle(display.audioState.tint)
-                    }
-                }
-
             }
+
+            AudioRoutingSection(display: display, client: client)
 
             Section("Status") {
                 LabeledContent("Current") {
@@ -2038,15 +2021,107 @@ struct DiscoveredDeviceView: View {
                     InfoTip(text: "Raises bitrate to reduce compression. Resolution still controls detail.")
                 }
 
-                HStack {
-                    Toggle("Chrome Audio to iPad", isOn: $client.audioStreamingEnabled)
-                    InfoTip(text: "Streams Chrome audio to the iPad and mutes it on this Mac.")
-                }
+            }
 
+            Section("Audio") {
+                Label("Connect this device to choose which Mac apps send audio to it.", systemImage: "speaker.wave.2")
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .navigationTitle(service.name)
+    }
+}
+
+private struct AudioRoutingSection: View {
+    let display: ConnectedDisplayInfo
+    @ObservedObject var client: NetworkClient
+
+    var body: some View {
+        Section {
+            if client.routableAudioApplications.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("No audio apps detected", systemImage: "speaker.slash")
+                        .foregroundStyle(.secondary)
+                    Text("Start playback in Safari, Spotify, Chrome, or another app, then refresh.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+            } else {
+                ForEach(client.routableAudioApplications) { application in
+                    AudioApplicationRouteRow(application: application, client: client)
+                }
+            }
+
+            HStack {
+                LabeledContent("Status") {
+                    Label(display.audioState.label, systemImage: display.audioState.symbolName)
+                        .foregroundStyle(display.audioState.tint)
+                }
+                Spacer()
+                Button("Refresh") {
+                    client.refreshAudioApplications()
+                }
+                .controlSize(.small)
+            }
+        } header: {
+            Text("Audio")
+        } footer: {
+            Text("Choose one output per app. Apps sent to an iPad are muted on this Mac only while its authenticated audio connection is ready.")
+        }
+    }
+}
+
+private struct AudioApplicationRouteRow: View {
+    let application: AudioApplicationInfo
+    @ObservedObject var client: NetworkClient
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(nsImage: applicationIcon)
+                .resizable()
+                .frame(width: 28, height: 28)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(application.displayName)
+                    .lineLimit(1)
+                Label(
+                    application.isRunningOutput ? "Audio output active" : "Waiting for audio",
+                    systemImage: application.isRunningOutput ? "waveform" : "pause.circle"
+                )
+                .font(.caption)
+                .foregroundStyle(application.isRunningOutput ? Color.green : Color.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            Picker(
+                "Output for \(application.displayName)",
+                selection: Binding(
+                    get: { client.audioRouteDestination(for: application.id) },
+                    set: { client.setAudioRouteDestination($0, for: application) }
+                )
+            ) {
+                ForEach(client.audioRouteDestinations) { destination in
+                    Text(destination.name).tag(destination.id)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 190)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var applicationIcon: NSImage {
+        if let path = application.bundlePath {
+            return NSWorkspace.shared.icon(forFile: path)
+        }
+        return NSImage(
+            systemSymbolName: "speaker.wave.2",
+            accessibilityDescription: nil
+        ) ?? NSImage()
     }
 }
 
@@ -2087,7 +2162,7 @@ struct InfoTip: View {
 
 enum AudioStreamingState: String, Equatable {
     case off
-    case waitingForChrome
+    case waitingForApps
     case connecting
     case streaming
     case retrying
@@ -2096,7 +2171,7 @@ enum AudioStreamingState: String, Equatable {
     var label: String {
         switch self {
         case .off: return "Off"
-        case .waitingForChrome: return "Waiting for Chrome"
+        case .waitingForApps: return "Waiting for selected apps"
         case .connecting: return "Connecting"
         case .streaming: return "Streaming"
         case .retrying: return "Reconnecting"
@@ -2107,7 +2182,7 @@ enum AudioStreamingState: String, Equatable {
     var symbolName: String {
         switch self {
         case .off: return "speaker.slash"
-        case .waitingForChrome: return "hourglass"
+        case .waitingForApps: return "hourglass"
         case .connecting, .retrying: return "arrow.triangle.2.circlepath"
         case .streaming: return "speaker.wave.2.fill"
         case .failed: return "exclamationmark.triangle.fill"
@@ -2118,7 +2193,7 @@ enum AudioStreamingState: String, Equatable {
         switch self {
         case .streaming: return .green
         case .failed: return .red
-        case .waitingForChrome, .connecting, .retrying: return .orange
+        case .waitingForApps, .connecting, .retrying: return .orange
         case .off: return .secondary
         }
     }
@@ -2141,6 +2216,13 @@ struct ConnectedDisplayInfo: Identifiable {
     /// specific Bonjour interface.
     var routeEvidence: String = "System selected; no physical-interface proof"
     var hasVerifiedRouteEvidence = false
+}
+
+struct AudioRouteDestinationOption: Identifiable, Equatable {
+    static let thisMacID = "__screen_bridge_this_mac__"
+
+    let id: String
+    let name: String
 }
 
 struct DiscoveredService: Identifiable {
@@ -2397,7 +2479,7 @@ struct ConnectionPipeline {
     var audioInputSequence: UInt64 = 0
     /// Pending (debounced) pipeline rebuild requested by a screen-info update.
     var screenInfoRebuildWork: DispatchWorkItem?
-    var lastChromeTapAttempt: Date = .distantPast
+    var lastAudioTapAttempt: Date = .distantPast
     // Background grace: set when the receiver announces it is backgrounding
     // (command 555). While set, the sender pauses video/audio sends, keeps the
     // virtual display and connection alive, and replaces the 15s heartbeat
@@ -2563,20 +2645,11 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     @Published var useVirtualDisplay: Bool = true { // Toggle between mirroring and extended display
         didSet { UserDefaults.standard.set(useVirtualDisplay, forKey: Self.useVirtualDisplayKey) }
     }
-    @Published var audioStreamingEnabled: Bool = false { // Master toggle for audio streaming
-        didSet {
-            UserDefaults.standard.set(audioStreamingEnabled, forKey: Self.audioStreamingEnabledKey)
-            if oldValue != audioStreamingEnabled && isConnected {
-                for index in connectedDisplays.indices {
-                    connectedDisplays[index].audioEnabled = audioStreamingEnabled
-                }
-                for connectionID in Array(pipelines.keys) {
-                    reconcileAudioPipeline(for: connectionID)
-                }
-            }
-        }
-    }
     @Published var connectedDisplays: [ConnectedDisplayInfo] = [] // Per-device display info
+    @Published private(set) var audioApplications: [AudioApplicationInfo] = []
+    @Published private(set) var audioRouteAssignments: [String: AudioRouteAssignment] = [:]
+    private var audioApplicationRefreshTimer: Timer?
+    private var lastAudioCatalogError: String?
 
 
     // Transfer Stats
@@ -2627,7 +2700,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     // These all used to be plain @Published values, so every one of them silently
     // reverted to its default on the next launch.
     private static let useVirtualDisplayKey = "settings.useVirtualDisplay"
-    private static let audioStreamingEnabledKey = "settings.audioStreamingEnabled"
+    private static let audioRouteAssignmentsKey = "settings.audioRouteAssignments"
     private static let selectedResolutionKey = "settings.selectedResolutionName"
     private static let isRetinaKey = "settings.isRetina"
     private static let selectedQualityKey = "settings.selectedQuality"
@@ -2643,9 +2716,20 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         if defaults.object(forKey: Self.useVirtualDisplayKey) != nil {
             useVirtualDisplay = defaults.bool(forKey: Self.useVirtualDisplayKey)
         }
-        if defaults.object(forKey: Self.audioStreamingEnabledKey) != nil {
-            audioStreamingEnabled = defaults.bool(forKey: Self.audioStreamingEnabledKey)
+        if let data = defaults.data(forKey: Self.audioRouteAssignmentsKey) {
+            do {
+                audioRouteAssignments = try JSONDecoder().decode(
+                    [String: AudioRouteAssignment].self,
+                    from: data
+                )
+            } catch {
+                LogManager.shared.log("Sender: Ignoring invalid saved audio routes")
+            }
         }
+        // The old global Chrome toggle cannot express per-app/per-device
+        // ownership. Remove it after migration so it cannot silently re-enable
+        // a route the user did not choose in the new UI.
+        defaults.removeObject(forKey: "settings.audioStreamingEnabled")
         if defaults.object(forKey: Self.isRetinaKey) != nil {
             isRetina = defaults.bool(forKey: Self.isRetinaKey)
         }
@@ -2670,6 +2754,153 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
 
     private func deviceKey(for name: String) -> String {
         canonicalDeviceName(name)
+    }
+
+    var routableAudioApplications: [AudioApplicationInfo] {
+        var applicationsByID = Dictionary(uniqueKeysWithValues: audioApplications.map { ($0.id, $0) })
+        for assignment in audioRouteAssignments.values where applicationsByID[assignment.applicationID] == nil {
+            applicationsByID[assignment.applicationID] = AudioApplicationInfo(
+                id: assignment.applicationID,
+                bundleIdentifier: assignment.applicationID,
+                displayName: assignment.applicationName,
+                bundlePath: assignment.applicationBundlePath,
+                processBundleIdentifiers: [],
+                isRunningOutput: false
+            )
+        }
+
+        return applicationsByID.values
+            .filter { $0.isRunningOutput || audioRouteAssignments[$0.id] != nil }
+            .sorted {
+                if $0.isRunningOutput != $1.isRunningOutput {
+                    return $0.isRunningOutput && !$1.isRunningOutput
+                }
+                return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+            }
+    }
+
+    var audioRouteDestinations: [AudioRouteDestinationOption] {
+        var destinations = [
+            AudioRouteDestinationOption(id: AudioRouteDestinationOption.thisMacID, name: "This Mac")
+        ]
+        var seen: Set<String> = [AudioRouteDestinationOption.thisMacID]
+
+        for display in connectedDisplays {
+            let id = deviceKey(for: display.name)
+            guard seen.insert(id).inserted else { continue }
+            destinations.append(AudioRouteDestinationOption(id: id, name: display.name))
+        }
+
+        for assignment in audioRouteAssignments.values {
+            guard seen.insert(assignment.destinationID).inserted else { continue }
+            destinations.append(
+                AudioRouteDestinationOption(
+                    id: assignment.destinationID,
+                    name: "\(assignment.destinationName) (Offline)"
+                )
+            )
+        }
+        return destinations
+    }
+
+    func audioRouteDestination(for applicationID: String) -> String {
+        audioRouteAssignments[applicationID]?.destinationID ?? AudioRouteDestinationOption.thisMacID
+    }
+
+    func setAudioRouteDestination(_ destinationID: String, for application: AudioApplicationInfo) {
+        let previousDestinationID = audioRouteAssignments[application.id]?.destinationID
+
+        if destinationID == AudioRouteDestinationOption.thisMacID {
+            audioRouteAssignments = AudioRouteAssignments.removing(
+                applicationID: application.id,
+                from: audioRouteAssignments
+            )
+        } else {
+            let destinationName = audioRouteDestinations.first(where: { $0.id == destinationID })?.name
+                .replacingOccurrences(of: " (Offline)", with: "")
+                ?? destinationID
+            audioRouteAssignments = AudioRouteAssignments.assigning(
+                application,
+                to: destinationID,
+                destinationName: destinationName,
+                in: audioRouteAssignments
+            )
+        }
+
+        persistAudioRouteAssignments()
+        let affectedDestinations = Set([previousDestinationID, destinationID].compactMap { $0 })
+        for (connectionID, pipeline) in pipelines
+            where affectedDestinations.contains(deviceKey(for: pipeline.service.name)) {
+            stopAudioPipeline(for: connectionID)
+            reconcileAudioPipeline(for: connectionID)
+        }
+        updateConnectedDisplays()
+
+        let destinationDescription = destinationID == AudioRouteDestinationOption.thisMacID
+            ? "This Mac"
+            : (audioRouteAssignments[application.id]?.destinationName ?? destinationID)
+        LogManager.shared.log("Sender: Routed \(application.displayName) audio to \(destinationDescription)")
+    }
+
+    func refreshAudioApplications() {
+        do {
+            let discovered = try AudioApplicationCatalog.applications()
+            var applicationsByID = Dictionary(
+                uniqueKeysWithValues: audioApplications.map {
+                    ($0.id, AudioApplicationInfo(
+                        id: $0.id,
+                        bundleIdentifier: $0.bundleIdentifier,
+                        displayName: $0.displayName,
+                        bundlePath: $0.bundlePath,
+                        processBundleIdentifiers: $0.processBundleIdentifiers,
+                        isRunningOutput: false
+                    ))
+                }
+            )
+            for application in discovered {
+                applicationsByID[application.id] = application
+            }
+            audioApplications = Array(applicationsByID.values)
+            lastAudioCatalogError = nil
+
+            var updatedAssignments = audioRouteAssignments
+            for application in discovered {
+                guard let assignment = updatedAssignments[application.id] else { continue }
+                updatedAssignments[application.id] = AudioRouteAssignment(
+                    applicationID: application.id,
+                    applicationName: application.displayName,
+                    applicationBundlePath: application.bundlePath,
+                    destinationID: assignment.destinationID,
+                    destinationName: assignment.destinationName
+                )
+            }
+            if updatedAssignments != audioRouteAssignments {
+                audioRouteAssignments = updatedAssignments
+                persistAudioRouteAssignments()
+            }
+        } catch {
+            let message = error.localizedDescription
+            if lastAudioCatalogError != message {
+                lastAudioCatalogError = message
+                LogManager.shared.log("Sender: Audio app discovery unavailable: \(message)")
+            }
+        }
+    }
+
+    private func persistAudioRouteAssignments() {
+        do {
+            let data = try JSONEncoder().encode(audioRouteAssignments)
+            UserDefaults.standard.set(data, forKey: Self.audioRouteAssignmentsKey)
+        } catch {
+            LogManager.shared.log("Sender: Unable to save audio routes")
+        }
+    }
+
+    private func startAudioApplicationRefreshTimer() {
+        audioApplicationRefreshTimer?.invalidate()
+        audioApplicationRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.refreshAudioApplications()
+        }
     }
 
     private func saveHiddenDeviceKeys() {
@@ -2705,6 +2936,8 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         foundServices.removeAll { deviceKey(for: $0.name) == key }
         connectedServices.removeAll { deviceKey(for: $0.name) == key }
         connectingServiceNames.remove(key)
+        audioRouteAssignments = audioRouteAssignments.filter { $0.value.destinationID != key }
+        persistAudioRouteAssignments()
         hiddenDeviceKeys.insert(key)
         saveHiddenDeviceKeys()
         LogManager.shared.log("Sender: Forgot device \(name)")
@@ -2941,6 +3174,8 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             .flatMap(VirtualDisplayManager.DisplayPlacement.init(rawValue:)) ?? .right
         hiddenDeviceKeys = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenDeviceKeysDefaultsKey) ?? [])
         restorePersistedSettings()
+        refreshAudioApplications()
+        startAudioApplicationRefreshTimer()
         hasFinishedInitialization = true
         // Screen Bridge is display-only: all direct control stays on the Mac.
         UserDefaults.standard.removeObject(forKey: "iPadInputEnabled")
@@ -3433,7 +3668,12 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     private static let audioConnectTimeout: TimeInterval = 8.0
 
     private func startDedicatedAudioConnection(for connectionId: UUID, allowAnyRoute: Bool = false) {
-        guard let pipeline = pipelines[connectionId], pipeline.supportsTypeByte else { return }
+        guard let pipeline = pipelines[connectionId] else { return }
+        guard pipeline.supportsTypeByte else {
+            setAudioState(.failed, for: connectionId)
+            LogManager.shared.log("AudioConnection: Receiver does not support the authenticated audio transport")
+            return
+        }
         guard pipeline.audioConnection == nil else { return }
         guard let secret = loadPairingSecret() else {
             LogManager.shared.log("AudioConnection: Missing pairing secret for \(pipeline.service.name)")
@@ -3534,13 +3774,12 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                                     }
                                 }
                                 self.pipelines[connectionId]?.audioPacketSender = packetSender
-                                self.pipelines[connectionId]?.audioEncoder?.delegate = packetSender
                                 packetSender.setPaused(
                                     self.pipelines[connectionId]?.backgroundGraceStart != nil
                                 )
-                                self.setAudioState(.streaming, for: connectionId)
                                 LogManager.shared.log("AudioConnection: Dedicated audio TCP ready for \(serviceName)")
                                 self.receiveAuxiliary(on: audioConnection, connectionId: connectionId)
+                                self.startSelectedAudioCapture(for: connectionId)
                             case .failure(let error):
                                 LogManager.shared.log("AudioConnection: Authentication failed for \(serviceName): \(error.localizedDescription)")
                                 self.handleAudioConnectionEnded(
@@ -3597,14 +3836,10 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         pipelines[connectionId]?.audioPacketSender = nil
 
         if desiredAudioEnabled(for: connectionId) {
-            // A process tap configured as `.muted` must not outlive its output
-            // transport. Tear it down immediately so Chrome becomes audible on
-            // the Mac during retry instead of disappearing on both devices.
-            pipelines[connectionId]?.processAudioCapture?.stop()
-            pipelines[connectionId]?.audioEncoder?.delegate = nil
-            pipelines[connectionId]?.processAudioCapture = nil
-            pipelines[connectionId]?.audioEncoder = nil
-            pipelines[connectionId]?.appliedAudioEnabled = false
+            // A muted process tap must not outlive its output transport. Tear it
+            // down immediately so selected apps become audible on the Mac during
+            // retry instead of disappearing on both devices.
+            stopSelectedAudioCapture(for: connectionId)
             setAudioState(.retrying, for: connectionId)
             LogManager.shared.log("AudioConnection: Will retry \(reason) for \(pipelines[connectionId]?.service.name ?? "receiver")")
         } else {
@@ -4575,17 +4810,6 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         removeConnection(connectionId)
     }
 
-    func setAudioEnabled(_ enabled: Bool, for connectionId: UUID) {
-        if let idx = connectedDisplays.firstIndex(where: { $0.id == connectionId }) {
-            connectedDisplays[idx].audioEnabled = enabled
-            let name = connectedDisplays[idx].name
-            LogManager.shared.log("Sender: Audio \(enabled ? "enabled" : "disabled") for \(name)")
-            if pipelines[connectionId] != nil {
-                reconcileAudioPipeline(for: connectionId)
-            }
-        }
-    }
-
     func updateConnectedDisplays() {
         var seenDeviceKeys: Set<String> = []
         connectedDisplays = pipelines.compactMap { (id, pipeline) in
@@ -4598,7 +4822,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                 name: pipeline.service.name,
                 resolution: res,
                 displayBounds: bounds,
-                audioEnabled: connectedDisplays.first(where: { $0.id == id })?.audioEnabled ?? audioStreamingEnabled,
+                audioEnabled: !selectedAudioApplicationIDs(for: id).isEmpty,
                 audioState: pipeline.audioState,
                 cgDisplayID: pipeline.virtualDisplayManager?.displayID,
                 requestedRoute: pipeline.requestedRoute,
@@ -4739,7 +4963,10 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                                     // grace deadline instead of the 15s heartbeat timeout.
                                     if self.pipelines[connectionId]?.backgroundGraceStart == nil {
                                         self.pipelines[connectionId]?.backgroundGraceStart = Date()
-                                        self.pipelines[connectionId]?.audioPacketSender?.setPaused(true)
+                                        // A backgrounded receiver cannot consume audio. Tear
+                                        // down the muted tap immediately so selected apps
+                                        // become audible on the Mac during the hold.
+                                        self.stopAudioPipeline(for: connectionId)
                                         LogManager.shared.log("Sender: Receiver \(pipeline.service.name) entered background — grace period started (\(Int(self.backgroundGraceDuration))s), pausing stream, keeping virtual display")
                                     }
                                     return
@@ -4749,7 +4976,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                                 // active again — end the grace period and resume the stream.
                                 if let graceStart = self.pipelines[connectionId]?.backgroundGraceStart {
                                     self.pipelines[connectionId]?.backgroundGraceStart = nil
-                                    self.pipelines[connectionId]?.audioPacketSender?.setPaused(false)
+                                    self.reconcileAudioPipeline(for: connectionId)
                                     let away = Int(Date().timeIntervalSince(graceStart))
                                     LogManager.shared.log("Sender: Receiver \(pipeline.service.name) resumed after \(away)s in background — resuming stream")
                                     self.pipelines[connectionId]?.videoEncoder?.forceKeyframe()
@@ -5223,9 +5450,16 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         }
     }
 
+    private func selectedAudioApplicationIDs(for connectionId: UUID) -> Set<String> {
+        guard let pipeline = pipelines[connectionId] else { return [] }
+        return AudioRouteAssignments.applicationIDs(
+            routedTo: deviceKey(for: pipeline.service.name),
+            in: audioRouteAssignments
+        )
+    }
+
     private func desiredAudioEnabled(for connectionId: UUID) -> Bool {
-        connectedDisplays.first(where: { $0.id == connectionId })?.audioEnabled
-            ?? audioStreamingEnabled
+        !selectedAudioApplicationIDs(for: connectionId).isEmpty
     }
 
     private func setAudioState(_ state: AudioStreamingState, for connectionId: UUID) {
@@ -5237,7 +5471,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     }
 
     /// Retry only the auxiliary audio branch. Video capture, the encoder, and
-    /// the virtual display stay untouched while Chrome appears or the audio TCP
+    /// the virtual display stay untouched while selected apps appear or the audio TCP
     /// transport reconnects.
     private func recoverAudioPipelines() {
         let now = Date()
@@ -5251,18 +5485,17 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
 
             if let processTap = pipeline.processAudioCapture,
                processTap.requiresRebuildForCurrentProcesses() {
-                LogManager.shared.log("Sender: Chrome audio process set changed; rebuilding audio branch for \(pipeline.service.name)")
-                stopAudioPipeline(for: connectionId)
+                LogManager.shared.log("Sender: Selected audio process set changed; rebuilding app tap for \(pipeline.service.name)")
+                stopSelectedAudioCapture(for: connectionId)
                 setAudioState(.retrying, for: connectionId)
             }
 
             guard let currentPipeline = pipelines[connectionId] else { continue }
             if currentPipeline.processAudioCapture == nil {
-                // Process enumeration is cheap, and a long exponential backoff
-                // made enabling Chrome audio take up to a minute after the app
-                // was opened. Retry on the existing three-second recovery tick.
-                if currentPipeline.audioState == .waitingForChrome {
-                    guard now.timeIntervalSince(currentPipeline.lastChromeTapAttempt) >= 3 else {
+                // Process enumeration is cheap. Retry on the existing
+                // three-second recovery tick when a selected app starts audio.
+                if currentPipeline.audioState == .waitingForApps {
+                    guard now.timeIntervalSince(currentPipeline.lastAudioTapAttempt) >= 3 else {
                         continue
                     }
                 }
@@ -5276,32 +5509,46 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
 
     private func reconcileAudioPipeline(for connectionId: UUID) {
         guard let pipeline = pipelines[connectionId] else { return }
-        let shouldEnable = desiredAudioEnabled(for: connectionId)
+        let action = AudioPipelineReadinessPolicy.action(
+            hasSelectedApplications: desiredAudioEnabled(for: connectionId),
+            receiverIsBackgrounded: pipeline.backgroundGraceStart != nil,
+            hasTransport: pipeline.audioConnection != nil,
+            transportIsAuthenticated: pipeline.audioPacketSender != nil,
+            captureIsRunning: pipeline.processAudioCapture != nil
+        )
 
-        if !shouldEnable {
+        switch action {
+        case .stopAndRestoreLocalAudio:
             stopAudioPipeline(for: connectionId)
             pipelines[connectionId]?.appliedAudioEnabled = false
-            return
-        }
-
-        if pipeline.processAudioCapture != nil {
-            if pipeline.audioConnection == nil {
-                startDedicatedAudioConnection(for: connectionId)
-            }
+        case .keepStreaming:
             pipelines[connectionId]?.appliedAudioEnabled = true
+        case .connectTransport:
+            // Establish and authenticate the output transport before starting
+            // a muted tap. Otherwise the selected app could become silent on
+            // both devices for the whole connection timeout.
+            startDedicatedAudioConnection(for: connectionId)
+        case .waitForTransportAuthentication:
+            break
+        case .startCapture:
+            startSelectedAudioCapture(for: connectionId)
+        }
+    }
+
+    private func startSelectedAudioCapture(for connectionId: UUID) {
+        guard let pipeline = pipelines[connectionId],
+              pipeline.backgroundGraceStart == nil,
+              let packetSender = pipeline.audioPacketSender else { return }
+        let applicationIDs = selectedAudioApplicationIDs(for: connectionId)
+        guard !applicationIDs.isEmpty else {
+            stopAudioPipeline(for: connectionId)
             return
         }
 
         let audioEncoder = AudioEncoder(connectionId: connectionId)
-        // Explicit Chrome app families. ProcessAudioTapCapture admits only each
-        // named app plus its `.helper` audio-service descendants.
+        audioEncoder.delegate = packetSender
         let processTap = ProcessAudioTapCapture(
-            bundleIDs: [
-                "com.google.Chrome",
-                "com.google.Chrome.canary",
-                "com.google.Chrome.dev",
-                "com.google.Chrome.beta",
-            ],
+            applicationIDs: applicationIDs,
             muteProcess: true
         ) { audioBufferList, format, inputTime in
             audioEncoder.encode(audioBufferList: audioBufferList, sourceFormat: format, inputTime: inputTime)
@@ -5312,34 +5559,43 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             pipelines[connectionId]?.audioEncoder = audioEncoder
             pipelines[connectionId]?.processAudioCapture = processTap
             pipelines[connectionId]?.appliedAudioEnabled = true
-            setAudioState(.connecting, for: connectionId)
-            startDedicatedAudioConnection(for: connectionId)
-            LogManager.shared.log("Sender: Chrome audio capture enabled without rebuilding display for \(pipeline.service.name)")
+            setAudioState(.streaming, for: connectionId)
+            LogManager.shared.log(
+                "Sender: App audio capture enabled for \(applicationIDs.count) selection(s) on \(pipeline.service.name)"
+            )
         } catch let error as ProcessAudioTapCaptureError {
             audioEncoder.delegate = nil
             pipelines[connectionId]?.audioEncoder = nil
             pipelines[connectionId]?.processAudioCapture = nil
             pipelines[connectionId]?.appliedAudioEnabled = false
             switch error {
-            case .noMatchingAudioProcess:
-                setAudioState(.waitingForChrome, for: connectionId)
-                // Keep the retry prompt: opening Chrome after sharing starts
-                // should restore audio within the next recovery tick.
-                pipelines[connectionId]?.lastChromeTapAttempt = Date()
+            case .noMatchingAudioApplication:
+                setAudioState(.waitingForApps, for: connectionId)
+                pipelines[connectionId]?.lastAudioTapAttempt = Date()
             case .unsupportedOS:
+                stopAudioPipeline(for: connectionId)
                 setAudioState(.failed, for: connectionId)
             default:
                 setAudioState(.retrying, for: connectionId)
             }
-            LogManager.shared.log("Sender: Chrome-only audio capture unavailable (\(error.localizedDescription)); video/display remain active")
+            LogManager.shared.log("Sender: Selected app audio capture unavailable (\(error.localizedDescription)); video/display remain active")
         } catch {
             audioEncoder.delegate = nil
             pipelines[connectionId]?.audioEncoder = nil
             pipelines[connectionId]?.processAudioCapture = nil
             pipelines[connectionId]?.appliedAudioEnabled = false
             setAudioState(.retrying, for: connectionId)
-            LogManager.shared.log("Sender: Chrome-only audio capture unavailable (\(error.localizedDescription)); video/display remain active")
+            LogManager.shared.log("Sender: Selected app audio capture unavailable (\(error.localizedDescription)); video/display remain active")
         }
+    }
+
+    private func stopSelectedAudioCapture(for connectionId: UUID) {
+        guard let pipeline = pipelines[connectionId] else { return }
+        pipeline.processAudioCapture?.stop()
+        pipeline.audioEncoder?.delegate = nil
+        pipelines[connectionId]?.processAudioCapture = nil
+        pipelines[connectionId]?.audioEncoder = nil
+        pipelines[connectionId]?.appliedAudioEnabled = false
     }
 
     private func stopAudioPipeline(for connectionId: UUID) {
@@ -5347,15 +5603,12 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         let hadAudioResources = pipeline.processAudioCapture != nil
             || pipeline.audioConnection != nil
             || pipeline.audioEncoder != nil
-        pipeline.processAudioCapture?.stop()
+        stopSelectedAudioCapture(for: connectionId)
         pipeline.audioConnection?.stateUpdateHandler = nil
         pipeline.audioConnection?.cancel()
-        pipeline.audioEncoder?.delegate = nil
         pipeline.audioPacketSender?.invalidate()
-        pipelines[connectionId]?.processAudioCapture = nil
         pipelines[connectionId]?.audioConnection = nil
         pipelines[connectionId]?.audioSessionKey = nil
-        pipelines[connectionId]?.audioEncoder = nil
         pipelines[connectionId]?.audioPacketSender = nil
         setAudioState(.off, for: connectionId)
         if hadAudioResources {

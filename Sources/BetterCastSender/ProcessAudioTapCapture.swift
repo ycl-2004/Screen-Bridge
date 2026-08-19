@@ -1,9 +1,10 @@
 import Foundation
 import CoreAudio
+import BetterCastSenderSupport
 
 enum ProcessAudioTapCaptureError: LocalizedError {
     case unsupportedOS
-    case noMatchingAudioProcess([String])
+    case noMatchingAudioApplication([String])
     case createTapFailed(OSStatus)
     case readTapFormatFailed(OSStatus)
     case createAggregateFailed(OSStatus)
@@ -14,8 +15,8 @@ enum ProcessAudioTapCaptureError: LocalizedError {
         switch self {
         case .unsupportedOS:
             return "Process audio capture requires macOS 14.2 or newer"
-        case .noMatchingAudioProcess(let bundleIDs):
-            return "No active audio process matched \(bundleIDs.joined(separator: ", "))"
+        case .noMatchingAudioApplication(let applicationIDs):
+            return "No active audio process matched \(applicationIDs.joined(separator: ", "))"
         case .createTapFailed(let status):
             return "Unable to create process audio tap (\(status))"
         case .readTapFormatFailed(let status):
@@ -32,12 +33,12 @@ enum ProcessAudioTapCaptureError: LocalizedError {
 
 /// Captures and optionally mutes audio from selected macOS processes using Core Audio process taps.
 ///
-/// This is the path we need for "Chrome plays on iPad only": ScreenCaptureKit can copy system
-/// audio, but Core Audio taps can mute the tapped process while still delivering its samples.
+/// ScreenCaptureKit can copy system audio, but Core Audio taps can mute selected
+/// applications while still delivering their samples to a receiver.
 final class ProcessAudioTapCapture {
     typealias AudioHandler = (UnsafePointer<AudioBufferList>, AudioStreamBasicDescription, AudioTimeStamp) -> Void
 
-    private let targetBundleIDs: [String]
+    private let targetApplicationIDs: Set<String>
     private let muteProcess: Bool
     private let audioHandler: AudioHandler
     private let queue = DispatchQueue(label: "com.bettercast.process-audio-tap", qos: .userInteractive)
@@ -51,13 +52,11 @@ final class ProcessAudioTapCapture {
     private var observedReplacementProcessIDs: Set<AudioObjectID>?
     private var replacementObservationCount = 0
 
-    /// `bundleIDs` names the browser app families to capture. Chrome sends
-    /// audio through a `.helper` Core Audio process, so each explicit app ID
-    /// also admits its helper and helper descendants. This stays narrower than
-    /// an unrestricted prefix match, which could capture another Chrome
-    /// channel that the caller did not name.
-    init(bundleIDs: [String], muteProcess: Bool, audioHandler: @escaping AudioHandler) {
-        self.targetBundleIDs = bundleIDs
+    /// Application IDs are stable, user-facing identities produced by
+    /// `AudioApplicationCatalog`. The catalog resolves each identity back to
+    /// the current Core Audio process objects, including helper processes.
+    init(applicationIDs: Set<String>, muteProcess: Bool, audioHandler: @escaping AudioHandler) {
+        self.targetApplicationIDs = applicationIDs
         self.muteProcess = muteProcess
         self.audioHandler = audioHandler
     }
@@ -72,15 +71,20 @@ final class ProcessAudioTapCapture {
             throw ProcessAudioTapCaptureError.unsupportedOS
         }
 
-        let processIDs = try Self.audioProcessIDs(matchingBundleIDs: targetBundleIDs)
+        let processIDs = try AudioApplicationCatalog.processObjectIDs(
+            matchingApplicationIDs: targetApplicationIDs
+        )
         guard !processIDs.isEmpty else {
-            throw ProcessAudioTapCaptureError.noMatchingAudioProcess(targetBundleIDs)
+            throw ProcessAudioTapCaptureError.noMatchingAudioApplication(targetApplicationIDs.sorted())
         }
 
         let tapDescription = CATapDescription(stereoMixdownOfProcesses: processIDs)
-        tapDescription.name = "Screen Bridge Chrome Audio"
+        tapDescription.name = "Screen Bridge App Audio"
         tapDescription.isPrivate = true
-        tapDescription.muteBehavior = muteProcess ? .muted : .unmuted
+        // `.mutedWhenTapped` is fail-safe: selected apps are local-muted while
+        // this aggregate device is actively reading, then return to the Mac if
+        // capture stops unexpectedly.
+        tapDescription.muteBehavior = muteProcess ? .mutedWhenTapped : .unmuted
 
         var newTapID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateProcessTap(tapDescription, &newTapID)
@@ -98,7 +102,7 @@ final class ProcessAudioTapCapture {
             observedReplacementProcessIDs = nil
             replacementObservationCount = 0
 
-            LogManager.shared.log("ProcessAudioTap: Started muted capture for \(processIDs.count) Chrome audio process(es)")
+            LogManager.shared.log("ProcessAudioTap: Started capture for \(processIDs.count) selected audio process(es)")
         } catch {
             stop()
             throw error
@@ -129,19 +133,23 @@ final class ProcessAudioTapCapture {
     }
 
     /// A process tap captures the concrete Core Audio process objects supplied
-    /// when it is created. Chrome replaces those objects as renderer processes
-    /// start, stop, or restart, so a long-lived tap must be rebuilt when the
-    /// matching process set changes.
+    /// when it is created. Applications can replace those objects as helper or
+    /// renderer processes start, stop, or restart, so a long-lived tap must be
+    /// rebuilt when the matching process set changes.
     ///
     /// Require the same replacement set twice before rebuilding. This avoids
-    /// interrupting audio for a one-poll process transition while Chrome is
-    /// creating a renderer.
+    /// interrupting audio for a one-poll process transition while an app and
+    /// its helper processes are still settling.
     func requiresRebuildForCurrentProcesses() -> Bool {
         guard isRunning else { return false }
 
         let currentProcessIDs: Set<AudioObjectID>
         do {
-            currentProcessIDs = Set(try Self.audioProcessIDs(matchingBundleIDs: targetBundleIDs))
+            currentProcessIDs = Set(
+                try AudioApplicationCatalog.processObjectIDs(
+                    matchingApplicationIDs: targetApplicationIDs
+                )
+            )
         } catch {
             return false
         }
@@ -219,72 +227,6 @@ final class ProcessAudioTapCapture {
             throw ProcessAudioTapCaptureError.readTapFormatFailed(status)
         }
         return format
-    }
-
-    private static func audioProcessIDs(matchingBundleIDs bundleIDs: [String]) throws -> [AudioObjectID] {
-        let processIDs = try allAudioProcessIDs()
-
-        return processIDs.filter { processID in
-            guard let bundleID = stringProperty(processID, selector: kAudioProcessPropertyBundleID) else {
-                return false
-            }
-            guard bundleIDs.contains(where: { targetBundleID in
-                let helperBundleID = targetBundleID + ".helper"
-                return bundleID == targetBundleID
-                    || bundleID == helperBundleID
-                    || bundleID.hasPrefix(helperBundleID + ".")
-            }) else {
-                return false
-            }
-            return true
-        }
-    }
-
-    private static func allAudioProcessIDs() throws -> [AudioObjectID] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyProcessObjectList,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var dataSize: UInt32 = 0
-        var status = AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            0,
-            nil,
-            &dataSize
-        )
-        guard status == noErr else { return [] }
-
-        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
-        var processIDs = [AudioObjectID](repeating: AudioObjectID(kAudioObjectUnknown), count: count)
-        status = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            0,
-            nil,
-            &dataSize,
-            &processIDs
-        )
-        guard status == noErr else { return [] }
-
-        return processIDs.filter { $0 != kAudioObjectUnknown }
-    }
-
-    private static func stringProperty(_ objectID: AudioObjectID, selector: AudioObjectPropertySelector) -> String? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: selector,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var value: CFString?
-        var size = UInt32(MemoryLayout<CFString?>.size)
-        let status = withUnsafeMutablePointer(to: &value) { pointer in
-            AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, pointer)
-        }
-        guard status == noErr, let value else { return nil }
-        return value as String
     }
 
 }

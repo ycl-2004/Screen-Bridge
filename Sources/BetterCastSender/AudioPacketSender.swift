@@ -6,6 +6,11 @@ import BetterCastShared
 /// a dedicated serial queue. UI/main-actor state only receives failure signals;
 /// encoded audio bytes never transit the main queue.
 final class AudioPacketSender: AudioEncoderDelegate, @unchecked Sendable {
+    /// A healthy 48 kHz AAC stream completes a packet send in milliseconds.
+    /// Bound an unacknowledged Network.framework send so a half-open auxiliary
+    /// socket cannot leave selected apps muted while packets are only dropped.
+    private static let sendCompletionTimeout: TimeInterval = 3.0
+
     private let connection: NWConnection
     private let connectionId: UUID
     private let serviceName: String
@@ -18,6 +23,7 @@ final class AudioPacketSender: AudioEncoderDelegate, @unchecked Sendable {
     private var invalidated = false
     private var paused = false
     private var failureReported = false
+    private var sendGeneration: UInt64 = 0
     private var nextSequence: UInt32 = 0
     private var nextSampleTime: UInt64 = 0
     private var sentPackets = 0
@@ -56,6 +62,8 @@ final class AudioPacketSender: AudioEncoderDelegate, @unchecked Sendable {
     func invalidate() {
         let work = { [self] in
             invalidated = true
+            sendGeneration &+= 1
+            sendInProgress = false
             pendingPackets.removeAll()
         }
         if DispatchQueue.getSpecific(key: queueKey) != nil {
@@ -121,17 +129,23 @@ final class AudioPacketSender: AudioEncoderDelegate, @unchecked Sendable {
     private func send(_ packet: Data) {
         guard !invalidated else { return }
         sendInProgress = true
+        sendGeneration &+= 1
+        let generation = sendGeneration
         let startedAt = DispatchTime.now().uptimeNanoseconds
+
+        queue.asyncAfter(deadline: .now() + Self.sendCompletionTimeout) { [weak self] in
+            self?.handleSendTimeout(generation: generation)
+        }
 
         connection.send(content: packet, completion: .contentProcessed { [weak self] error in
             self?.queue.async { [weak self] in
-                self?.finishSend(startedAt: startedAt, error: error)
+                self?.finishSend(generation: generation, startedAt: startedAt, error: error)
             }
         })
     }
 
-    private func finishSend(startedAt: UInt64, error: NWError?) {
-        guard !invalidated else { return }
+    private func finishSend(generation: UInt64, startedAt: UInt64, error: NWError?) {
+        guard !invalidated, sendInProgress, generation == sendGeneration else { return }
         sendInProgress = false
 
         if let error {
@@ -157,6 +171,23 @@ final class AudioPacketSender: AudioEncoderDelegate, @unchecked Sendable {
         if let next = pendingPackets.dequeue() {
             send(next)
         }
+    }
+
+    private func handleSendTimeout(generation: UInt64) {
+        guard !invalidated,
+              sendInProgress,
+              generation == sendGeneration,
+              !failureReported else { return }
+
+        invalidated = true
+        sendInProgress = false
+        failureReported = true
+        pendingPackets.removeAll()
+        let error = NWError.posix(.ETIMEDOUT)
+        LogManager.shared.log(
+            "AudioSend: Send stalled for \(serviceName) beyond \(Int(Self.sendCompletionTimeout))s; restoring local audio"
+        )
+        failureHandler(error)
     }
 
     private func logStatistics(reason: String) {

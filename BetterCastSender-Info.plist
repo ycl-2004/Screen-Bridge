@@ -36,7 +36,5 @@
     <string>Screen Bridge needs to capture your screen to stream it to the receiver.</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>Screen Bridge needs to capture selected app audio so it can play on the receiver instead of this Mac.</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Screen Bridge needs access to audio for system sound capture (if enabled).</string>
 </dict>
 </plist>

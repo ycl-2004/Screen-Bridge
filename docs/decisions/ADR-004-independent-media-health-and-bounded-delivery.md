@@ -61,7 +61,7 @@ into seconds of latency.
   to the Network.framework send window divided by the actual elapsed sampling
   interval. It is an aggregate application-delivery rate across displays, not
   physical link capacity and not an audio/control traffic counter.
-- Audio owns a separate authenticated transport. Chrome process changes or
+- Audio owns a separate authenticated transport. Selected-app process changes or
   auxiliary transport failures rebuild only that audio branch; they never
   rebuild the virtual display or change the receiver's global video state.
 - Each display/capture incarnation has a generation. Delayed display polling,

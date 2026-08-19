@@ -134,7 +134,7 @@ struct Changelog {
     static let entries: [Entry] = [
         Entry(version: AppVersion.current, highlights: [
             "Extended or mirrored display streaming",
-            "Private pairing with optional Chrome audio",
+            "Private pairing with per-app audio routing",
         ]),
     ]
 }
