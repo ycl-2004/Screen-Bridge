@@ -1,0 +1,51 @@
+name: Test Apple targets
+
+on:
+  push:
+    paths:
+      - 'Package.swift'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'BetterCastIOS.xcodeproj/**'
+      - '.github/workflows/test-apple.yml'
+  pull_request:
+    paths:
+      - 'Package.swift'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'BetterCastIOS.xcodeproj/**'
+      - '.github/workflows/test-apple.yml'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  apple:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Run Swift package tests
+        run: swift test
+
+      - name: Build macOS package targets with strict concurrency
+        run: swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+
+      - name: Build iOS receiver without signing
+        run: >-
+          xcodebuild
+          -project BetterCastIOS.xcodeproj
+          -scheme BetterCastReceiverIOS
+          -configuration Debug
+          -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/BetterCastIOSDerivedData"
+          CODE_SIGNING_ALLOWED=NO
+          build

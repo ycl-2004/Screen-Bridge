@@ -4,6 +4,13 @@ public enum AudioCodec: UInt8, Equatable, Sendable {
     case aacLC = 1
 }
 
+/// Flags carried by the v3 audio header.
+public enum AudioPacketFlags {
+    /// `sampleTime` came from a valid capture timestamp rather than the
+    /// sender's monotonic packet fallback.
+    public static let sampleTimeValid: UInt8 = 1 << 0
+}
+
 public enum AudioPacketFramingError: Error, Equatable, Sendable {
     case truncatedHeader
     case emptyPayload
@@ -130,6 +137,179 @@ public struct AudioSequenceTracker: Equatable, Sendable {
 
     public mutating func reset() {
         expectedSequence = nil
+    }
+}
+
+/// Converts capture-domain sample positions into the 48 kHz packet timeline.
+/// Core Audio timestamps are only used when all inputs are finite and valid;
+/// callers can then fall back to their existing synthetic counter.
+public enum AudioSampleTimingPolicy {
+    public static func outputSampleTime(
+        inputSampleTime: Double,
+        inputSampleRate: Double,
+        outputSampleRate: Double
+    ) -> UInt64? {
+        guard inputSampleTime.isFinite, inputSampleTime >= 0,
+              inputSampleRate.isFinite, inputSampleRate > 0,
+              outputSampleRate.isFinite, outputSampleRate > 0 else {
+            return nil
+        }
+
+        let scaledSampleTime = inputSampleTime * outputSampleRate / inputSampleRate
+        guard scaledSampleTime.isFinite, scaledSampleTime >= 0 else {
+            return nil
+        }
+        return UInt64(exactly: scaledSampleTime.rounded())
+    }
+}
+
+/// Frame-count rules shared by the encoder and its tests. AudioConverter asks
+/// for input packets; the callback must never claim more than is available.
+public enum AudioConverterFramePolicy {
+    public static func inputFramesNeeded(
+        forOutputFrames outputFrames: Int,
+        inputSampleRate: Double,
+        outputSampleRate: Double
+    ) -> Int? {
+        guard outputFrames > 0,
+              inputSampleRate.isFinite, inputSampleRate > 0,
+              outputSampleRate.isFinite, outputSampleRate > 0 else {
+            return nil
+        }
+
+        let frames = Double(outputFrames) * inputSampleRate / outputSampleRate
+        guard frames.isFinite, frames > 0, frames < Double(Int.max) else { return nil }
+        return Int(ceil(frames))
+    }
+
+    public static func framesToProvide(requested: Int, available: Int) -> Int {
+        guard requested > 0, available > 0 else { return 0 }
+        return min(requested, available)
+    }
+}
+
+/// Small reusable byte FIFO for real-time PCM accumulation. It grows only
+/// when necessary and never shifts the existing contents on every read.
+public struct AudioPCMByteRingBuffer: Sendable {
+    private var storage: [UInt8]
+    private var readIndex = 0
+    public private(set) var count = 0
+
+    public init(capacity: Int = 64 * 1024) {
+        precondition(capacity > 0)
+        storage = Array(repeating: 0, count: capacity)
+    }
+
+    public var capacity: Int { storage.count }
+    public var isEmpty: Bool { count == 0 }
+
+    public mutating func append(_ source: UnsafeRawPointer, byteCount: Int) {
+        guard byteCount > 0 else { return }
+        ensureCapacity(for: count + byteCount)
+
+        let writeIndex = (readIndex + count) % storage.count
+        let firstCount = min(byteCount, storage.count - writeIndex)
+        storage.withUnsafeMutableBytes { rawStorage in
+            let destination = rawStorage.baseAddress!.advanced(by: writeIndex)
+            destination.copyMemory(from: source, byteCount: firstCount)
+            if firstCount < byteCount {
+                rawStorage.baseAddress!.copyMemory(
+                    from: source.advanced(by: firstCount),
+                    byteCount: byteCount - firstCount
+                )
+            }
+        }
+        count += byteCount
+    }
+
+    public mutating func append(_ data: Data) {
+        data.withUnsafeBytes { rawData in
+            guard let baseAddress = rawData.baseAddress else { return }
+            append(baseAddress, byteCount: rawData.count)
+        }
+    }
+
+    /// Exposes only the current contiguous prefix. The pointer is valid for
+    /// the duration of `body`, which is exactly the AudioConverter callback's
+    /// synchronous input-data lifetime.
+    public func withContiguousReadableBytes<R>(
+        offset: Int = 0,
+        _ body: (UnsafeRawPointer, Int) -> R
+    ) -> R? {
+        guard offset >= 0, offset < count else { return nil }
+        let absoluteIndex = (readIndex + offset) % storage.count
+        let readableCount = min(count - offset, storage.count - absoluteIndex)
+        return storage.withUnsafeBytes { rawStorage in
+            body(rawStorage.baseAddress!.advanced(by: absoluteIndex), readableCount)
+        }
+    }
+
+    @discardableResult
+    public mutating func read(into destination: UnsafeMutableRawPointer, byteCount: Int) -> Bool {
+        guard byteCount >= 0, byteCount <= count else { return false }
+        guard byteCount > 0 else { return true }
+
+        let firstCount = min(byteCount, storage.count - readIndex)
+        storage.withUnsafeBytes { rawStorage in
+            destination.copyMemory(
+                from: rawStorage.baseAddress!.advanced(by: readIndex),
+                byteCount: firstCount
+            )
+            if firstCount < byteCount {
+                destination.advanced(by: firstCount).copyMemory(
+                    from: rawStorage.baseAddress!,
+                    byteCount: byteCount - firstCount
+                )
+            }
+        }
+        consume(byteCount)
+        return true
+    }
+
+    public mutating func consume(_ byteCount: Int) {
+        precondition(byteCount >= 0 && byteCount <= count)
+        guard byteCount > 0 else { return }
+        readIndex = (readIndex + byteCount) % storage.count
+        count -= byteCount
+        if count == 0 { readIndex = 0 }
+    }
+
+    public mutating func removeAll(keepingCapacity: Bool = true) {
+        count = 0
+        readIndex = 0
+        if !keepingCapacity {
+            storage.removeAll(keepingCapacity: false)
+        }
+    }
+
+    private mutating func ensureCapacity(for requiredCount: Int) {
+        guard requiredCount > storage.count else { return }
+
+        var newCapacity = storage.count
+        while newCapacity < requiredCount {
+            newCapacity *= 2
+        }
+
+        var newStorage = Array(repeating: UInt8(0), count: newCapacity)
+        if count > 0 {
+            let firstCount = min(count, storage.count - readIndex)
+            storage.withUnsafeBytes { oldStorage in
+                newStorage.withUnsafeMutableBytes { replacement in
+                    replacement.baseAddress!.copyMemory(
+                        from: oldStorage.baseAddress!.advanced(by: readIndex),
+                        byteCount: firstCount
+                    )
+                    if firstCount < count {
+                        replacement.baseAddress!.advanced(by: firstCount).copyMemory(
+                            from: oldStorage.baseAddress!,
+                            byteCount: count - firstCount
+                        )
+                    }
+                }
+            }
+        }
+        storage = newStorage
+        readIndex = 0
     }
 }
 

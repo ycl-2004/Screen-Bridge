@@ -41,10 +41,15 @@ final class AudioPacketSender: AudioEncoderDelegate, @unchecked Sendable {
         queue.setSpecific(key: queueKey, value: ())
     }
 
-    func audioEncoder(_ encoder: AudioEncoder, didEncode data: Data, for connectionId: UUID) {
+    func audioEncoder(
+        _ encoder: AudioEncoder,
+        didEncode data: Data,
+        sampleTime: UInt64?,
+        for connectionId: UUID
+    ) {
         guard connectionId == self.connectionId else { return }
         queue.async { [weak self] in
-            self?.enqueueEncodedAAC(data)
+            self?.enqueueEncodedAAC(data, sampleTime: sampleTime)
         }
     }
 
@@ -70,21 +75,23 @@ final class AudioPacketSender: AudioEncoderDelegate, @unchecked Sendable {
         }
     }
 
-    private func enqueueEncodedAAC(_ data: Data) {
+    private func enqueueEncodedAAC(_ data: Data, sampleTime: UInt64?) {
         guard !invalidated, !paused else { return }
 
         let sampleCount = UInt16(1024)
+        let packetSampleTime = sampleTime ?? nextSampleTime
         let framedAudio = FramedAudioPacket(
             header: AudioPacketHeader(
                 sequence: nextSequence,
-                sampleTime: nextSampleTime,
+                sampleTime: packetSampleTime,
                 sampleCount: sampleCount,
-                codec: .aacLC
+                codec: .aacLC,
+                flags: sampleTime == nil ? 0 : AudioPacketFlags.sampleTimeValid
             ),
             payload: data
         ).encoded()
         nextSequence &+= 1
-        nextSampleTime &+= UInt64(sampleCount)
+        nextSampleTime = packetSampleTime &+ UInt64(sampleCount)
 
         var body = Data([0x02])
         body.append(framedAudio)

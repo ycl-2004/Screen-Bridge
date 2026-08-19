@@ -2,9 +2,15 @@ import Foundation
 import AVFoundation
 @preconcurrency import AudioToolbox
 @preconcurrency import CoreMedia
+import BetterCastShared
 
 protocol AudioEncoderDelegate: AnyObject {
-    func audioEncoder(_ encoder: AudioEncoder, didEncode data: Data, for connectionId: UUID)
+    func audioEncoder(
+        _ encoder: AudioEncoder,
+        didEncode data: Data,
+        sampleTime: UInt64?,
+        for connectionId: UUID
+    )
 }
 
 final class AudioEncoder: @unchecked Sendable {
@@ -17,10 +23,18 @@ final class AudioEncoder: @unchecked Sendable {
     private var frameCount = 0
     private var hasLoggedUnsupportedFormat = false
 
-    // Interleaved PCM ring buffer — accumulates until we have 1024+ frames for AAC
-    private var pcmAccumulator = Data()
+    // Reusable PCM FIFO — accumulates until the converter has enough source
+    // frames for one 1024-frame AAC packet.
+    private var pcmAccumulator = AudioPCMByteRingBuffer()
+    private var interleavedScratch: [Float32] = []
+    private var pcmAccumulatorStartSampleTime: UInt64?
     private var interleavedChannels: UInt32 = 2
     private var bytesPerInterleavedFrame: Int = 8 // channels * sizeof(Float32)
+    private let outputBufferSize: UInt32 = 8192
+    private var aacOutputBuffer: UnsafeMutableRawPointer?
+    private var inputFramesNeededForAACPacket = Int(BCConstants.aacFrameSize)
+    private var converterInputOffset = 0
+    private var converterInputBytesConsumed = 0
 
     init(connectionId: UUID) {
         self.connectionId = connectionId
@@ -64,10 +78,14 @@ final class AudioEncoder: @unchecked Sendable {
 
         guard status == noErr else { return }
 
-        encode(audioBufferList: UnsafePointer(ablPtr), sourceFormat: srcFormat)
+        encode(audioBufferList: UnsafePointer(ablPtr), sourceFormat: srcFormat, inputTime: nil)
     }
 
-    func encode(audioBufferList: UnsafePointer<AudioBufferList>, sourceFormat srcFormat: AudioStreamBasicDescription) {
+    func encode(
+        audioBufferList: UnsafePointer<AudioBufferList>,
+        sourceFormat srcFormat: AudioStreamBasicDescription,
+        inputTime: AudioTimeStamp? = nil
+    ) {
         let isFloatPCM = srcFormat.mFormatID == kAudioFormatLinearPCM
             && (srcFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0
             && srcFormat.mBitsPerChannel == 32
@@ -95,20 +113,36 @@ final class AudioEncoder: @unchecked Sendable {
         let bytesPerSample = Int(srcFormat.mBitsPerChannel / 8)
         guard channels > 0, bytesPerSample > 0 else { return }
 
+        let captureSampleTime: UInt64?
+        if let inputTime, inputTime.mFlags.contains(.sampleTimeValid) {
+            captureSampleTime = AudioSampleTimingPolicy.outputSampleTime(
+                inputSampleTime: inputTime.mSampleTime,
+                inputSampleRate: srcFormat.mSampleRate,
+                outputSampleRate: BCConstants.audioSampleRate
+            )
+        } else {
+            captureSampleTime = nil
+        }
+
         let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: audioBufferList))
 
-        if isNonInterleaved && channels == 2 && abl.count >= 2 {
+        let accumulatorWasEmpty = pcmAccumulator.isEmpty
+
+        if isNonInterleaved && channels == 2 {
             // Non-interleaved: each buffer is one channel's float samples
+            guard abl.count >= 2 else { return }
             let leftBuf = abl[0]
             let rightBuf = abl[1]
 
             guard let leftData = leftBuf.mData, let rightData = rightBuf.mData else { return }
 
-            let framesPerChannel = Int(leftBuf.mDataByteSize) / bytesPerSample
-            var interleaved = Data(count: framesPerChannel * channels * bytesPerSample)
-
-            interleaved.withUnsafeMutableBytes { outBuf in
-                let out = outBuf.baseAddress!.assumingMemoryBound(to: Float32.self)
+            let leftFrames = Int(leftBuf.mDataByteSize) / bytesPerSample
+            let rightFrames = Int(rightBuf.mDataByteSize) / bytesPerSample
+            let framesPerChannel = min(leftFrames, rightFrames)
+            guard framesPerChannel > 0 else { return }
+            ensureInterleavedScratchCapacity(for: framesPerChannel * channels)
+            interleavedScratch.withUnsafeMutableBufferPointer { scratch in
+                let out = scratch.baseAddress!
                 let left = leftData.assumingMemoryBound(to: Float32.self)
                 let right = rightData.assumingMemoryBound(to: Float32.self)
 
@@ -116,9 +150,11 @@ final class AudioEncoder: @unchecked Sendable {
                     out[i * 2] = left[i]
                     out[i * 2 + 1] = right[i]
                 }
+                pcmAccumulator.append(
+                    UnsafeRawPointer(out),
+                    byteCount: framesPerChannel * channels * bytesPerSample
+                )
             }
-
-            pcmAccumulator.append(interleaved)
         } else if channels == 1 {
             // The wire format is always stereo. Duplicate mono rather than
             // silently creating a mono AAC packet the receiver would decode as 2ch.
@@ -126,42 +162,45 @@ final class AudioEncoder: @unchecked Sendable {
             let buf = abl[0]
             guard let data = buf.mData else { return }
             let frames = Int(buf.mDataByteSize) / bytesPerSample
-            var stereo = Data(count: frames * 2 * bytesPerSample)
-            stereo.withUnsafeMutableBytes { output in
+            guard frames > 0 else { return }
+            ensureInterleavedScratchCapacity(for: frames * 2)
+            interleavedScratch.withUnsafeMutableBufferPointer { scratch in
                 let source = data.assumingMemoryBound(to: Float32.self)
-                let destination = output.baseAddress!.assumingMemoryBound(to: Float32.self)
+                let destination = scratch.baseAddress!
                 for frame in 0..<frames {
                     destination[frame * 2] = source[frame]
                     destination[frame * 2 + 1] = source[frame]
                 }
+                pcmAccumulator.append(
+                    UnsafeRawPointer(destination),
+                    byteCount: frames * 2 * bytesPerSample
+                )
             }
-            pcmAccumulator.append(stereo)
         } else {
             // Interleaved stereo can be copied directly.
             guard abl.count > 0, let data = abl[0].mData else { return }
-            pcmAccumulator.append(Data(bytes: data, count: Int(abl[0].mDataByteSize)))
+            let byteCount = Int(abl[0].mDataByteSize)
+            guard byteCount > 0 else { return }
+            pcmAccumulator.append(UnsafeRawPointer(data), byteCount: byteCount)
         }
 
-        // Produce AAC packets while we have enough PCM frames buffered
-        let framesNeeded = Int(BCConstants.aacFrameSize)
-        let bytesNeeded = framesNeeded * bytesPerInterleavedFrame
+        if accumulatorWasEmpty, pcmAccumulator.count > 0 {
+            pcmAccumulatorStartSampleTime = captureSampleTime
+        }
+
+        // Produce AAC packets while we have enough source PCM frames buffered.
+        // At 44.1 kHz, fewer than 1024 source frames represent one 48 kHz AAC
+        // packet; the converter callback below still caps each request.
+        let bytesNeeded = inputFramesNeededForAACPacket * bytesPerInterleavedFrame
 
         while pcmAccumulator.count >= bytesNeeded {
-            let chunk = pcmAccumulator.prefix(bytesNeeded)
-            pcmAccumulator.removeFirst(bytesNeeded)
-
-            // Store for callback
-            currentChunk = chunk
-            currentChunkOffset = 0
-
-            let outputBufferSize: UInt32 = 8192
-            let outputBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: Int(outputBufferSize))
-            defer { outputBuffer.deallocate() }
-
+            guard let outputBuffer = aacOutputBuffer else { return }
+            converterInputOffset = 0
+            converterInputBytesConsumed = 0
             let outBuffer = AudioBuffer(
                 mNumberChannels: interleavedChannels,
                 mDataByteSize: outputBufferSize,
-                mData: UnsafeMutableRawPointer(outputBuffer)
+                mData: outputBuffer
             )
             var outBufferList = AudioBufferList(mNumberBuffers: 1, mBuffers: outBuffer)
 
@@ -184,53 +223,91 @@ final class AudioEncoder: @unchecked Sendable {
                 &outBufferList,
                 nil
             )
+            let consumedBytes = converterInputBytesConsumed
+            if consumedBytes > 0 {
+                pcmAccumulator.consume(consumedBytes)
+            }
+            if consumedBytes == 0 {
+                break
+            }
 
             if convertStatus == noErr && outBufferList.mBuffers.mDataByteSize > 0 {
                 let aacData = Data(bytes: outBufferList.mBuffers.mData!,
                                   count: Int(outBufferList.mBuffers.mDataByteSize))
+                let packetSampleTime = pcmAccumulatorStartSampleTime
 
                 frameCount += 1
                 if frameCount % 100 == 1 {
                     LogManager.shared.log("AudioEncoder: Encoded AAC packet \(frameCount), \(aacData.count) bytes")
                 }
 
-                delegate?.audioEncoder(self, didEncode: aacData, for: connectionId)
+                delegate?.audioEncoder(
+                    self,
+                    didEncode: aacData,
+                    sampleTime: packetSampleTime,
+                    for: connectionId
+                )
+                if let packetSampleTime {
+                    pcmAccumulatorStartSampleTime = packetSampleTime &+ UInt64(BCConstants.aacFrameSize)
+                }
             } else if convertStatus != noErr {
                 frameCount += 1
                 if frameCount % 200 == 1 {
                     LogManager.shared.log("AudioEncoder: Convert failed (status \(convertStatus))")
                 }
+                // AudioConverter may have consumed input before reporting an
+                // error. Avoid attaching an unverified timestamp to the next
+                // packet; the sender will use its safe synthetic fallback.
+                pcmAccumulatorStartSampleTime = nil
             }
         }
-
-        currentChunk = nil
     }
-
-    // Input data for the current 1024-frame chunk
-    private var currentChunk: Data?
-    private var currentChunkOffset: Int = 0
 
     private func provideInputData(ioNumberDataPackets: UnsafeMutablePointer<UInt32>,
                                    ioData: UnsafeMutablePointer<AudioBufferList>,
                                    outDataPacketDescription: UnsafeMutablePointer<UnsafeMutablePointer<AudioStreamPacketDescription>?>?) -> OSStatus {
-        guard let chunk = currentChunk, currentChunkOffset < chunk.count else {
+        guard pcmAccumulator.count > 0 else {
             ioNumberDataPackets.pointee = 0
             return -1
         }
 
-        let remaining = chunk.count - currentChunkOffset
-        chunk.withUnsafeBytes { rawBuffer in
-            let ptr = rawBuffer.baseAddress!.advanced(by: currentChunkOffset)
-            ioData.pointee.mBuffers.mData = UnsafeMutableRawPointer(mutating: ptr)
-            ioData.pointee.mBuffers.mDataByteSize = UInt32(remaining)
-            ioData.pointee.mBuffers.mNumberChannels = interleavedChannels
+        let requestedFrames = Int(ioNumberDataPackets.pointee)
+        let availableFrames = pcmAccumulator.withContiguousReadableBytes(
+            offset: converterInputOffset
+        ) { _, byteCount in
+            byteCount / bytesPerInterleavedFrame
+        } ?? 0
+        let framesToProvide = AudioConverterFramePolicy.framesToProvide(
+            requested: requestedFrames,
+            available: availableFrames
+        )
+        guard framesToProvide > 0 else {
+            ioNumberDataPackets.pointee = 0
+            return -1
         }
 
-        let frames = remaining / bytesPerInterleavedFrame
-        ioNumberDataPackets.pointee = UInt32(frames)
-        currentChunkOffset = chunk.count
+        let bytesToProvide = framesToProvide * bytesPerInterleavedFrame
+        let status: OSStatus = pcmAccumulator.withContiguousReadableBytes(
+            offset: converterInputOffset
+        ) { pointer, _ in
+            ioData.pointee.mBuffers.mData = UnsafeMutableRawPointer(mutating: pointer)
+            ioData.pointee.mBuffers.mDataByteSize = UInt32(bytesToProvide)
+            ioData.pointee.mBuffers.mNumberChannels = interleavedChannels
+            ioNumberDataPackets.pointee = UInt32(framesToProvide)
+            return noErr
+        } ?? -1
+        if status == noErr {
+            converterInputOffset += bytesToProvide
+            converterInputBytesConsumed += bytesToProvide
+        }
 
-        return noErr
+        return status
+    }
+
+    private func ensureInterleavedScratchCapacity(for floatCount: Int) {
+        if interleavedScratch.count < floatCount {
+            interleavedScratch = Array(repeating: 0, count: floatCount)
+        }
     }
 
     private func setupConverter(sourceFormat: AudioStreamBasicDescription) {
@@ -276,6 +353,15 @@ final class AudioEncoder: @unchecked Sendable {
 
         inputFormat = src
         outputFormat = dst
+        inputFramesNeededForAACPacket = AudioConverterFramePolicy.inputFramesNeeded(
+            forOutputFrames: Int(BCConstants.aacFrameSize),
+            inputSampleRate: sourceFormat.mSampleRate,
+            outputSampleRate: BCConstants.audioSampleRate
+        ) ?? Int(BCConstants.aacFrameSize)
+        aacOutputBuffer = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(outputBufferSize),
+            alignment: MemoryLayout<UInt8>.alignment
+        )
 
         let isNonInterleaved = (sourceFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
         LogManager.shared.log(
@@ -287,6 +373,7 @@ final class AudioEncoder: @unchecked Sendable {
     }
 
     deinit {
+        aacOutputBuffer?.deallocate()
         if let converter = converter {
             AudioConverterDispose(converter)
         }

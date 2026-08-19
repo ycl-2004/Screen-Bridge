@@ -35,7 +35,7 @@ enum ProcessAudioTapCaptureError: LocalizedError {
 /// This is the path we need for "Chrome plays on iPad only": ScreenCaptureKit can copy system
 /// audio, but Core Audio taps can mute the tapped process while still delivering its samples.
 final class ProcessAudioTapCapture {
-    typealias AudioHandler = (UnsafePointer<AudioBufferList>, AudioStreamBasicDescription) -> Void
+    typealias AudioHandler = (UnsafePointer<AudioBufferList>, AudioStreamBasicDescription, AudioTimeStamp) -> Void
 
     private let bundleIDPrefixes: [String]
     private let muteProcess: Bool
@@ -159,9 +159,9 @@ final class ProcessAudioTapCapture {
 
     private func createAndStartIOProc() throws {
         var newIOProcID: AudioDeviceIOProcID?
-        let status = AudioDeviceCreateIOProcIDWithBlock(&newIOProcID, aggregateDeviceID, queue) { [weak self] _, inputData, _, _, _ in
+        let status = AudioDeviceCreateIOProcIDWithBlock(&newIOProcID, aggregateDeviceID, queue) { [weak self] _, inputData, inputTime, _, _ in
             guard let self else { return }
-            self.audioHandler(inputData, self.streamFormat)
+            self.audioHandler(inputData, self.streamFormat, inputTime.pointee)
         }
 
         guard status == noErr, let newIOProcID else {

@@ -4773,8 +4773,8 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
         let processTap = ProcessAudioTapCapture(
             bundleIDPrefixes: ["com.google.Chrome"],
             muteProcess: true
-        ) { audioBufferList, format in
-            audioEncoder.encode(audioBufferList: audioBufferList, sourceFormat: format)
+        ) { audioBufferList, format, inputTime in
+            audioEncoder.encode(audioBufferList: audioBufferList, sourceFormat: format, inputTime: inputTime)
         }
 
         do {
