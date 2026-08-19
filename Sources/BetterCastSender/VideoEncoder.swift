@@ -67,6 +67,8 @@ final class VideoEncoder: @unchecked Sendable {
     private var pendingKeyFrameRequest = false
     private var lastKeyFrameTime: Date = Date.distantPast
     private let keyframeThrottleInterval: TimeInterval
+    /// One log per throttle episode instead of one per throttled frame.
+    private var keyframeThrottleLogged = false
 
     private var expectedFPS: Int
 
@@ -281,10 +283,18 @@ final class VideoEncoder: @unchecked Sendable {
             LogManager.shared.log("VideoEncoder: Forcing Keyframe (Frame \(frameCount))")
             frameProperties[kVTEncodeFrameOptionKey_ForceKeyFrame as String] = kCFBooleanTrue
             pendingKeyFrameRequest = false
+            keyframeThrottleLogged = false
             lastKeyFrameTime = Date()
         } else if pendingKeyFrameRequest {
-            LogManager.shared.log("VideoEncoder: Keyframe Request Throttled (Last: \(timeSinceLastKeyFrame)s ago)")
-            pendingKeyFrameRequest = false
+            // Keep the request pending instead of clearing it: a receiver
+            // request that lands inside the throttle window (P2P/wired links
+            // throttle for ~3.3s) used to be silently swallowed, leaving the
+            // picture corrupted until the receiver re-requested or the next
+            // GOP. The request fires as soon as the window clears.
+            if !keyframeThrottleLogged {
+                keyframeThrottleLogged = true
+                LogManager.shared.log("VideoEncoder: Keyframe Request Throttled (Last: \(timeSinceLastKeyFrame)s ago); will fire when the window clears")
+            }
         }
 
         let completionToken = completion.map(VideoFrameCompletionToken.init)

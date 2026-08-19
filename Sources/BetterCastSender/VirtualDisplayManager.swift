@@ -106,7 +106,18 @@ final class VirtualDisplayManager: @unchecked Sendable {
 
     /// Creates a virtual display with the specified resolution
     /// - Returns: The CGDirectDisplayID of the created virtual display, or nil if creation failed
-    func createDisplay(resolution: Resolution, placement: DisplayPlacement = .right) -> CGDirectDisplayID? {
+    /// Outcome of a virtual-display creation attempt. `busy` is not an error:
+    /// it means another creation is already running on this manager, which
+    /// happens when runloop-serviced UI callbacks re-enter `createDisplay`
+    /// mid-flight. Callers should retry shortly instead of failing the
+    /// connection.
+    enum CreationOutcome {
+        case success(CGDirectDisplayID)
+        case busy
+        case failure
+    }
+
+    func createDisplay(resolution: Resolution, placement: DisplayPlacement = .right) -> CreationOutcome {
         return createDisplay(
             width: resolution.width,
             height: resolution.height,
@@ -124,7 +135,7 @@ final class VirtualDisplayManager: @unchecked Sendable {
     /// online display. Capture backends cannot see such a display and the user
     /// cannot move windows onto it, so it is treated as a failure and retried
     /// under a fresh identity rather than returned as if it worked.
-    func createDisplay(width: Int, height: Int, ppi: Int, hiDPI: Bool, name: String, placement: DisplayPlacement = .right) -> CGDirectDisplayID? {
+    func createDisplay(width: Int, height: Int, ppi: Int, hiDPI: Bool, name: String, placement: DisplayPlacement = .right) -> CreationOutcome {
         // `waitOnePollInterval` services the main runloop while waiting for
         // WindowServer, so debounced UI callbacks can re-enter this method in
         // the middle of the (up to ~8s) creation. A nested create would fight
@@ -135,7 +146,7 @@ final class VirtualDisplayManager: @unchecked Sendable {
             return true
         }) else {
             LogManager.shared.log("VirtualDisplayManager: Refusing nested createDisplay while another creation is in flight")
-            return nil
+            return .busy
         }
         defer { stateLock.withLock { isCreatingDisplay = false } }
 
@@ -179,7 +190,7 @@ final class VirtualDisplayManager: @unchecked Sendable {
                 }
                 LogManager.shared.log("VirtualDisplayManager: Created virtual display with ID \(displayIDValue) (serial \(serial), attempt \(attempt))")
                 schedulePlacement(for: displayIDValue, placement: placement)
-                return displayIDValue
+                return .success(displayIDValue)
             }
 
             LogManager.shared.log(
@@ -196,7 +207,7 @@ final class VirtualDisplayManager: @unchecked Sendable {
                 + "\(VirtualDisplayManager.maximumIdentityAttempts) attempts. "
                 + "Another virtual display may still be held by this app."
         )
-        return nil
+        return .failure
     }
 
     /// True once WindowServer publishes `displayID` as an online display.

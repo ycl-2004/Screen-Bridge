@@ -22,6 +22,11 @@ final class AudioEncoder: @unchecked Sendable {
     private var outputFormat: AudioStreamBasicDescription?
     private var frameCount = 0
     private var hasLoggedUnsupportedFormat = false
+    /// Converter creation backoff: a persistently failing AudioConverterNew
+    /// must not retry (and log) on every tap callback (~46x/s).
+    private var lastConverterCreationAttempt = Date.distantPast
+    private var hasLoggedConverterFailure = false
+    private static let converterRetryInterval: TimeInterval = 5.0
 
     // Reusable PCM FIFO — accumulates until the converter has enough source
     // frames for one 1024-frame AAC packet.
@@ -127,9 +132,16 @@ final class AudioEncoder: @unchecked Sendable {
             disposeConverterAndBuffers()
         }
 
-        // Initialize converter on first audio frame
-        if converter == nil {
+        // Initialize converter on first audio frame, with a retry backoff so a
+        // persistently failing creation doesn't run at callback rate.
+        if converter == nil,
+           Date().timeIntervalSince(lastConverterCreationAttempt) >= Self.converterRetryInterval {
+            lastConverterCreationAttempt = Date()
             setupConverter(sourceFormat: srcFormat)
+            if converter != nil, hasLoggedConverterFailure {
+                hasLoggedConverterFailure = false
+                LogManager.shared.log("AudioEncoder: AAC converter recovered")
+            }
         }
 
         guard let converter = converter else { return }
@@ -369,7 +381,13 @@ final class AudioEncoder: @unchecked Sendable {
 
         let status = AudioConverterNew(&src, &dst, &converter)
         if status != noErr {
-            LogManager.shared.log("AudioEncoder: Failed to create AAC converter: \(status)")
+            if !hasLoggedConverterFailure {
+                hasLoggedConverterFailure = true
+                LogManager.shared.log(
+                    "AudioEncoder: Failed to create AAC converter: \(status) "
+                        + "(retrying every \(Int(Self.converterRetryInterval))s)"
+                )
+            }
             return
         }
 
@@ -405,6 +423,9 @@ final class AudioEncoder: @unchecked Sendable {
         aacOutputBuffer?.deallocate()
         aacOutputBuffer = nil
         converter = nil
+        // Intentional rebuilds (source rate changed) retry immediately; the
+        // backoff only throttls persistent creation failures.
+        lastConverterCreationAttempt = .distantPast
         inputFormat = nil
         outputFormat = nil
         pcmAccumulator.removeAll()

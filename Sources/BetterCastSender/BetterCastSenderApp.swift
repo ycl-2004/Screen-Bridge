@@ -2433,6 +2433,9 @@ struct ConnectionPipeline {
     var videoEncoder: VideoEncoder?
     var audioEncoder: AudioEncoder?
     var processAudioCapture: ProcessAudioTapCapture?
+    /// True while a process tap's asynchronous Core Audio creation is running,
+    /// so the recovery tick neither double-starts nor rebuild-checks it.
+    var audioTapStartInFlight: Bool = false
     var audioPacketSender: AudioPacketSender?
     /// Invalidates delayed display/capture callbacks from an older pipeline
     /// incarnation after a resolution or orientation rebuild.
@@ -2621,6 +2624,11 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     /// at most one of these private displays at a time, so creating a second one
     /// while a held display is alive yields a display that never goes online.
     private var heldVirtualDisplays: [String: HeldVirtualDisplay] = [:]
+    /// Busy-retry budget for virtual-display creation, keyed by connection.
+    /// Reset on successful creation; capped so a wedged creator cannot retry
+    /// forever.
+    private var displayBusyRetryCounts: [UUID: Int] = [:]
+    private static let maximumDisplayBusyRetries = 5
     private let pairingSecretStore: PairingSecretStoring = KeychainPairingSecretStore()
 
     @Published var status: String = "Idle"
@@ -2650,6 +2658,9 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     @Published private(set) var audioRouteAssignments: [String: AudioRouteAssignment] = [:]
     private var audioApplicationRefreshTimer: Timer?
     private var lastAudioCatalogError: String?
+    /// Guards against piling up enumeration passes when a slow catalog read
+    /// (many audio processes + first-seen app bundles) outlasts the 2s tick.
+    private var audioCatalogRefreshInFlight = false
 
 
     // Transfer Stats
@@ -2843,8 +2854,25 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
     }
 
     func refreshAudioApplications() {
-        do {
-            let discovered = try AudioApplicationCatalog.applications()
+        // The catalog read walks every Core Audio process (mach IPC per
+        // object) and resolves bundles from disk on first sight — far too much
+        // synchronous work for the main thread at a 2s cadence.
+        guard !audioCatalogRefreshInFlight else { return }
+        audioCatalogRefreshInFlight = true
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let discovered = Result { try AudioApplicationCatalog.applications() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.audioCatalogRefreshInFlight = false
+                self.applyDiscoveredAudioApplications(discovered)
+            }
+        }
+    }
+
+    private func applyDiscoveredAudioApplications(_ discovered: Result<[AudioApplicationInfo], Error>) {
+        switch discovered {
+        case .success(let discovered):
             var applicationsByID = Dictionary(
                 uniqueKeysWithValues: audioApplications.map {
                     ($0.id, AudioApplicationInfo(
@@ -2878,7 +2906,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                 audioRouteAssignments = updatedAssignments
                 persistAudioRouteAssignments()
             }
-        } catch {
+        case .failure(let error):
             let message = error.localizedDescription
             if lastAudioCatalogError != message {
                 lastAudioCatalogError = message
@@ -3829,17 +3857,19 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
 
         connection.stateUpdateHandler = nil
         connection.cancel()
-        pipelines[connectionId]?.audioEncoder?.delegate = nil
         pipelines[connectionId]?.audioPacketSender?.invalidate()
         pipelines[connectionId]?.audioConnection = nil
         pipelines[connectionId]?.audioSessionKey = nil
         pipelines[connectionId]?.audioPacketSender = nil
 
+        // Stop the process tap before the encoder's delegate detaches:
+        // stopSelectedAudioCapture drains the tap's IO queue first, so no
+        // in-flight encode callback still reads the delegate when it goes
+        // nil. Unconditional on purpose — a muted tap must never outlive its
+        // output transport, even on a path that expected it to be gone.
+        stopSelectedAudioCapture(for: connectionId)
+
         if desiredAudioEnabled(for: connectionId) {
-            // A muted process tap must not outlive its output transport. Tear it
-            // down immediately so selected apps become audible on the Mac during
-            // retry instead of disappearing on both devices.
-            stopSelectedAudioCapture(for: connectionId)
             setAudioState(.retrying, for: connectionId)
             LogManager.shared.log("AudioConnection: Will retry \(reason) for \(pipelines[connectionId]?.service.name ?? "receiver")")
         } else {
@@ -4682,6 +4712,7 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             pending.stateUpdateHandler = nil
             pending.cancel()
         }
+        displayBusyRetryCounts.removeValue(forKey: connectionId)
         guard let pipeline = pipelines[connectionId] else { return }
 
         // Tear down this connection's pipeline
@@ -5273,12 +5304,19 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                 }
             }
 
-            if let displayID = adoptedDisplayID
-                ?? displayManager.createDisplay(resolution: resolution, placement: displayPlacement) {
+            let creation: VirtualDisplayManager.CreationOutcome
+            if let adoptedDisplayID {
+                creation = .success(adoptedDisplayID)
+            } else {
+                creation = displayManager.createDisplay(resolution: resolution, placement: displayPlacement)
+            }
+            switch creation {
+            case .success(let displayID):
                 targetDisplayID = displayID
                 pipelines[connectionId]?.virtualDisplayManager = displayManager
                 pipelines[connectionId]?.virtualDisplayResolution = resolution
                 pipelines[connectionId]?.virtualDisplayID = displayID
+                displayBusyRetryCounts[connectionId] = nil
 
                 // Update InputHandler with this connection's display bounds
                 // Retry with increasing delays — macOS may take time to register the virtual display
@@ -5299,7 +5337,25 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                     LogManager.shared.log("Sender: Virtual display created for \(serviceName) with ID \(displayID)")
                     LogManager.shared.log("Sender: Go to System Settings > Displays to arrange it")
                 }
-            } else {
+            case .busy:
+                // Another creation is in flight (settings rebuild racing a
+                // reconnect, or a second receiver finishing its pipeline).
+                // The display subsystem is not broken — retry shortly instead
+                // of tearing down an authenticated connection.
+                let retryCount = displayBusyRetryCounts[connectionId, default: 0]
+                guard retryCount < Self.maximumDisplayBusyRetries else {
+                    LogManager.shared.log("Sender: Virtual display creation stayed busy for \(serviceName); giving up")
+                    removeConnection(connectionId)
+                    setPhase(.failed, "Virtual display unavailable")
+                    return
+                }
+                displayBusyRetryCounts[connectionId] = retryCount + 1
+                LogManager.shared.log("Sender: Virtual display creation busy for \(serviceName); retrying (\(retryCount + 1)/\(Self.maximumDisplayBusyRetries))")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    self?.startPipeline(for: connectionId)
+                }
+                return
+            case .failure:
                 LogManager.shared.log("Sender: Failed to create virtual display for \(serviceName); refusing to mirror the main screen in Extended Display mode")
                 removeConnection(connectionId)
                 // Set after teardown so the failure reason stays visible.
@@ -5483,17 +5539,29 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
                 continue
             }
 
-            if let processTap = pipeline.processAudioCapture,
-               processTap.requiresRebuildForCurrentProcesses() {
-                LogManager.shared.log("Sender: Selected audio process set changed; rebuilding app tap for \(pipeline.service.name)")
-                stopSelectedAudioCapture(for: connectionId)
-                setAudioState(.retrying, for: connectionId)
+            if let processTap = pipeline.processAudioCapture {
+                guard !pipeline.audioTapStartInFlight else { continue }
+                // The process-list read is mach IPC; it runs off the main
+                // thread and the rebuild decision comes back on main.
+                processTap.requiresRebuildForCurrentProcesses { [weak self] needsRebuild in
+                    guard let self, needsRebuild else { return }
+                    guard let current = self.pipelines[connectionId],
+                          current.processAudioCapture === processTap,
+                          !current.audioTapStartInFlight else { return }
+                    LogManager.shared.log("Sender: Selected audio process set changed; rebuilding app tap for \(current.service.name)")
+                    self.stopSelectedAudioCapture(for: connectionId)
+                    self.setAudioState(.retrying, for: connectionId)
+                    self.reconcileAudioPipeline(for: connectionId)
+                }
             }
 
             guard let currentPipeline = pipelines[connectionId] else { continue }
             if currentPipeline.processAudioCapture == nil {
-                // Process enumeration is cheap. Retry on the existing
-                // three-second recovery tick when a selected app starts audio.
+                // A tap start is already in flight; the completion owns the
+                // next state transition.
+                if currentPipeline.audioTapStartInFlight { continue }
+                // Retry on the existing three-second recovery tick when a
+                // selected app starts audio.
                 if currentPipeline.audioState == .waitingForApps {
                     guard now.timeIntervalSince(currentPipeline.lastAudioTapAttempt) >= 3 else {
                         continue
@@ -5554,20 +5622,55 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             audioEncoder.encode(audioBufferList: audioBufferList, sourceFormat: format, inputTime: inputTime)
         }
 
-        do {
-            try processTap.start()
-            pipelines[connectionId]?.audioEncoder = audioEncoder
-            pipelines[connectionId]?.processAudioCapture = processTap
-            pipelines[connectionId]?.appliedAudioEnabled = true
-            setAudioState(.streaming, for: connectionId)
-            LogManager.shared.log(
-                "Sender: App audio capture enabled for \(applicationIDs.count) selection(s) on \(pipeline.service.name)"
-            )
-        } catch let error as ProcessAudioTapCaptureError {
-            audioEncoder.delegate = nil
-            pipelines[connectionId]?.audioEncoder = nil
-            pipelines[connectionId]?.processAudioCapture = nil
-            pipelines[connectionId]?.appliedAudioEnabled = false
+        // Publish the in-flight capture into the pipeline immediately so every
+        // teardown path can stop it even before Core Audio creation finishes.
+        pipelines[connectionId]?.audioTapStartInFlight = true
+        pipelines[connectionId]?.audioEncoder = audioEncoder
+        pipelines[connectionId]?.processAudioCapture = processTap
+
+        // Tap creation is synchronous mach IPC (tens–hundreds of ms); it runs
+        // off the main thread and reports back on main.
+        processTap.start { [weak self] result in
+            guard let self else { return }
+            // The pipeline may have torn this capture down (unroute, rebuild,
+            // disconnect) while creation was in flight — including having
+            // installed a newer tap. Only apply state to this exact capture.
+            guard let pipeline = self.pipelines[connectionId],
+                  pipeline.processAudioCapture === processTap,
+                  pipeline.audioTapStartInFlight else { return }
+
+            self.pipelines[connectionId]?.audioTapStartInFlight = false
+            switch result {
+            case .success:
+                self.pipelines[connectionId]?.appliedAudioEnabled = true
+                self.setAudioState(.streaming, for: connectionId)
+                LogManager.shared.log(
+                    "Sender: App audio capture enabled for \(applicationIDs.count) selection(s) on \(pipeline.service.name)"
+                )
+            case .failure(let error):
+                self.handleSelectedAudioCaptureStartFailure(
+                    error,
+                    encoder: audioEncoder,
+                    connectionId: connectionId
+                )
+            }
+        }
+    }
+
+    /// Mirrors the failure handling the synchronous start path used: detached
+    /// encoder, cleared pipeline slots, and an audio state matching the error.
+    private func handleSelectedAudioCaptureStartFailure(
+        _ error: Error,
+        encoder audioEncoder: AudioEncoder,
+        connectionId: UUID
+    ) {
+        audioEncoder.delegate = nil
+        if self.pipelines[connectionId]?.audioEncoder === audioEncoder {
+            self.pipelines[connectionId]?.audioEncoder = nil
+        }
+        self.pipelines[connectionId]?.processAudioCapture = nil
+        self.pipelines[connectionId]?.appliedAudioEnabled = false
+        if let error = error as? ProcessAudioTapCaptureError {
             switch error {
             case .noMatchingAudioApplication:
                 setAudioState(.waitingForApps, for: connectionId)
@@ -5578,24 +5681,22 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
             default:
                 setAudioState(.retrying, for: connectionId)
             }
-            LogManager.shared.log("Sender: Selected app audio capture unavailable (\(error.localizedDescription)); video/display remain active")
-        } catch {
-            audioEncoder.delegate = nil
-            pipelines[connectionId]?.audioEncoder = nil
-            pipelines[connectionId]?.processAudioCapture = nil
-            pipelines[connectionId]?.appliedAudioEnabled = false
+        } else {
             setAudioState(.retrying, for: connectionId)
-            LogManager.shared.log("Sender: Selected app audio capture unavailable (\(error.localizedDescription)); video/display remain active")
         }
+        LogManager.shared.log("Sender: Selected app audio capture unavailable (\(error.localizedDescription)); video/display remain active")
     }
 
     private func stopSelectedAudioCapture(for connectionId: UUID) {
         guard let pipeline = pipelines[connectionId] else { return }
+        // stop() drains the tap's IO queue, so no encode callback is still
+        // reading the encoder's delegate when it is detached right after.
         pipeline.processAudioCapture?.stop()
         pipeline.audioEncoder?.delegate = nil
         pipelines[connectionId]?.processAudioCapture = nil
         pipelines[connectionId]?.audioEncoder = nil
         pipelines[connectionId]?.appliedAudioEnabled = false
+        pipelines[connectionId]?.audioTapStartInFlight = false
     }
 
     private func stopAudioPipeline(for connectionId: UUID) {

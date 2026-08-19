@@ -81,17 +81,19 @@ final class VideoDecoder: @unchecked Sendable {
     }
 
     func decode(data: Data) {
-        let admitted: Bool = pendingBytesLock.withLock { () -> Bool in
-            guard pendingDecodeBytes + data.count <= Self.maximumPendingDecodeBytes else { return false }
+        let admitted: Bool
+        let pendingBytesForLog: Int
+        (admitted, pendingBytesForLog) = pendingBytesLock.withLock { () -> (Bool, Int) in
+            guard pendingDecodeBytes + data.count <= Self.maximumPendingDecodeBytes else { return (false, pendingDecodeBytes) }
             pendingDecodeBytes += data.count
-            return true
+            return (true, pendingDecodeBytes)
         }
         if !admitted {
             // Over budget: drop the access unit and ask for a keyframe rather
             // than queueing unbounded latency and memory.
             if Date().timeIntervalSince(lastQueueDropLog) > 1.0 {
                 lastQueueDropLog = Date()
-                LogManager.shared.log("VideoDecoder: Decode queue over budget (\(pendingDecodeBytes) bytes pending); dropping frames until a keyframe")
+                LogManager.shared.log("VideoDecoder: Decode queue over budget (\(pendingBytesForLog) bytes pending); dropping frames until a keyframe")
             }
             reportDecodeFailure(status: kVTVideoDecoderMalfunctionErr)
             return

@@ -86,7 +86,9 @@ final class AudioPacketSender: AudioEncoderDelegate, @unchecked Sendable {
     private func enqueueEncodedAAC(_ data: Data, sampleTime: UInt64?) {
         guard !invalidated, !paused else { return }
 
-        let sampleCount = UInt16(1024)
+        // The receiver validates this against the codec's frame size; derive it
+        // from the same constant the encoder uses instead of a second literal.
+        let sampleCount = UInt16(BCConstants.aacFrameSize)
         let packetSampleTime = sampleTime ?? nextSampleTime
         let framedAudio = FramedAudioPacket(
             header: AudioPacketHeader(
