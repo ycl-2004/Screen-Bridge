@@ -248,7 +248,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
 
         // Subtitle
         let subtitleLabel = UILabel()
-        subtitleLabel.text = "iPad Display Receiver · v1.1.0"
+        subtitleLabel.text = "iPad Display Receiver · v1.1.1"
         subtitleLabel.textColor = UIColor(red: 0.4, green: 0.6, blue: 1.0, alpha: 1.0)
         subtitleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
         subtitleLabel.textAlignment = .center
@@ -780,7 +780,7 @@ class ViewController: UIViewController, NetworkListenerDelegate {
         settingsOverlay = settingsOverlayBlur
 
         let settingsTitleLabel = UILabel()
-        settingsTitleLabel.text = "Screen Bridge v1.1.0"
+        settingsTitleLabel.text = "Screen Bridge v1.1.1"
         settingsTitleLabel.textColor = UIColor.white.withAlphaComponent(0.9)
         settingsTitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         settingsTitleLabel.textAlignment = .center

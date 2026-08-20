@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ycl-2004/Screen-Bridge/releases/tag/v1.1.0"><img src="https://img.shields.io/badge/release-v1.1.0-111111" alt="Screen Bridge v1.1.0 release"></a>
+  <a href="https://github.com/ycl-2004/Screen-Bridge/releases/tag/v1.1.1"><img src="https://img.shields.io/badge/release-v1.1.1-111111" alt="Screen Bridge v1.1.1 release"></a>
   <img src="https://img.shields.io/badge/macOS-14.0%2B-111111?logo=apple&logoColor=white" alt="macOS 14.0 or later">
   <img src="https://img.shields.io/badge/iPadOS-13.0%2B-111111?logo=apple&logoColor=white" alt="iPadOS 13.0 or later">
   <img src="https://img.shields.io/badge/Mac-Universal-111111" alt="Universal Mac build for Apple silicon and Intel">
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ycl-2004/Screen-Bridge/releases/download/v1.1.0/Screen-Bridge-v1.1.0-macOS-universal.zip">Download for Mac</a>
+  <a href="https://github.com/ycl-2004/Screen-Bridge/releases/download/v1.1.1/Screen-Bridge-v1.1.1-macOS-universal.zip">Download for Mac</a>
   ·
   <a href="https://github.com/ycl-2004/Screen-Bridge/releases">Releases</a>
   ·
@@ -36,7 +36,7 @@ The active product path is a macOS sender plus an iPadOS receiver. It is built
 for one Mac and one iPad on a trusted local network, without an account, cloud
 service, analytics, or telemetry.
 
-> **Distribution status:** `v1.1.0` includes a downloadable Universal Mac ZIP
+> **Distribution status:** `v1.1.1` includes a downloadable Universal Mac ZIP
 > for Apple silicon and Intel. The app is ad-hoc signed and not notarized because
 > this project does not currently have a Developer ID identity. Treat it as a
 > self-use/preview build, not a general public installer. The iPad receiver must
@@ -50,7 +50,7 @@ pairing code on both devices before connecting.
 ### Mac
 
 1. Download
-   [`Screen-Bridge-v1.1.0-macOS-universal.zip`](https://github.com/ycl-2004/Screen-Bridge/releases/download/v1.1.0/Screen-Bridge-v1.1.0-macOS-universal.zip).
+   [`Screen-Bridge-v1.1.1-macOS-universal.zip`](https://github.com/ycl-2004/Screen-Bridge/releases/download/v1.1.1/Screen-Bridge-v1.1.1-macOS-universal.zip).
 2. Unzip it and move `Screen Bridge.app` to `/Applications`.
 3. On first launch, Control-click the app, choose **Open**, then confirm **Open**.
    The preview build is not notarized, so a normal double-click may be blocked.
@@ -182,22 +182,22 @@ because they show an earlier product name:
 ## Current release
 
 The current release is
-[`v1.1.0`](https://github.com/ycl-2004/Screen-Bridge/releases/tag/v1.1.0).
+[`v1.1.1`](https://github.com/ycl-2004/Screen-Bridge/releases/tag/v1.1.1).
 
 | Item | Current state |
 | --- | --- |
-| Source snapshot | Git tag `v1.1.0` |
-| Mac bundle metadata | `1.1.0 (build 2)` |
-| iPad bundle metadata | `1.1.0 (build 2)` |
-| Mac release asset | `Screen-Bridge-v1.1.0-macOS-universal.zip` |
+| Source snapshot | Git tag `v1.1.1` |
+| Mac bundle metadata | `1.1.1 (build 3)` |
+| iPad bundle metadata | `1.1.1 (build 3)` |
+| Mac release asset | `Screen-Bridge-v1.1.1-macOS-universal.zip` |
 | Mac architectures | `arm64` + `x86_64` |
 | Mac signature | ad-hoc, Hardened Runtime, not notarized |
-| Mac ZIP SHA-256 | `3ad492680186a13f0cfcd810aae4b00b0d8672d5d7a5077c54147d3e8d3a5b02` |
+| Mac ZIP SHA-256 | `98126b74cc2e3cb9cebc8cce31eaccd5684d72fc5997b5f8ede68dc8a1a92b70` |
 | Current app icon | `assets/branding/AppIcon.png` — YC hand-drawn / watercolor style |
 | Product overview asset | `assets/app_desc.png` |
 | iPad release asset | Not published; requires account/device-specific signing |
 
-See the [v1.1.0 release notes](docs/release-notes/v1.1.0.md) for changes and the
+See the [v1.1.1 release notes](docs/release-notes/v1.1.1.md) for changes and the
 verification boundary.
 
 ## FAQ
@@ -205,7 +205,7 @@ verification boundary.
 <details>
 <summary>Does the Mac download work on Apple silicon and Intel?</summary>
 
-Yes. The executable inside the `v1.1.0` ZIP was inspected with `lipo` and
+Yes. The executable inside the `v1.1.1` ZIP was inspected with `lipo` and
 contains both `arm64` and `x86_64` slices.
 
 </details>
@@ -327,26 +327,26 @@ names, repository, and release documentation use Screen Bridge.
 
 ## Versioning and releases
 
-The current public version is `v1.1.0`. App metadata uses `1.1.0` with build
-number `2`; the in-app label, packaging scripts, README, release notes, Git tag,
-and GitHub Release use `v1.1.0`.
+The current public version is `v1.1.1`. App metadata uses `1.1.1` with build
+number `3`; the in-app label, packaging scripts, README, release notes, Git tag,
+and GitHub Release use `v1.1.1`.
 
 Release binaries belong in GitHub Releases, not in the source tree. Historical
 `v1`, `v1.0`, and `v2.0` tags remain untouched as repository history.
 
 ## Verification status
 
-The `v1.1.0` release candidate was verified on macOS 26.6.1 with Swift 6.3.3
+The `v1.1.1` release candidate was verified on macOS 26.6.1 with Swift 6.3.3
 and Xcode 26.6:
 
 - `swift test`: 136 tests, 0 failures.
 - Universal Release build: succeeded for `arm64` and `x86_64`.
-- App bundle: `1.1.0 (2)`, macOS 14.0 minimum, ad-hoc signature verified with
+- App bundle: `1.1.1 (3)`, macOS 14.0 minimum, ad-hoc signature verified with
   `codesign --verify --deep --strict`.
 - ZIP: integrity test passed; an independently extracted app retained both
   architectures, version metadata, and a valid ad-hoc signature.
 - Unsigned generic iOS Release build: succeeded and produced an `arm64`
-  `Screen Bridge.app` with `1.1.0 (2)` metadata.
+  `Screen Bridge.app` with `1.1.1 (3)` metadata.
 - Signed iPad Debug build: installed on the connected iPad Air 5 running iPadOS
   15.7 with the Personal Team profile accepted as a seven-day development
   install; this is not a public IPA or long-lived distribution signature.
@@ -386,7 +386,7 @@ noted above.
 ## Links
 
 - [GitHub repository](https://github.com/ycl-2004/Screen-Bridge)
-- [Current release: v1.1.0](https://github.com/ycl-2004/Screen-Bridge/releases/tag/v1.1.0)
-- [Release notes: v1.1.0](docs/release-notes/v1.1.0.md)
+- [Current release: v1.1.1](https://github.com/ycl-2004/Screen-Bridge/releases/tag/v1.1.1)
+- [Release notes: v1.1.1](docs/release-notes/v1.1.1.md)
 - [GitHub readiness notes](docs/github-readiness.md)
 - [Architecture decisions](docs/decisions)

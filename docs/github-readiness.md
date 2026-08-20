@@ -12,7 +12,7 @@ This repository is close to being presentable as Screen Bridge, but there are tw
 - The user-facing macOS and iOS bundle display names are `Screen Bridge`.
 - The local discovery service is `_yc-cast._tcp`.
 - The repository declares MIT, but the source-provenance compatibility question tracked as K5 still requires owner/legal evidence before public redistribution.
-- Current release notes describe Screen Bridge v1.1.0; v1 and historical v8
+- Current release notes describe Screen Bridge v1.1.1; v1.1.0, v1, and historical v8
   notes remain as repository history.
 
 ## Still Worth Doing Before A Fully Public Launch
@@ -28,7 +28,7 @@ This repository is close to being presentable as Screen Bridge, but there are tw
 
 Do not commit built apps, DMGs, IPAs, or zip files. Put them in GitHub Releases so the source repository stays clean and reviewable.
 
-The current v1.1.0 Mac ZIP is an ad-hoc signed, non-notarized self-use/preview
+The current v1.1.1 Mac ZIP is an ad-hoc signed, non-notarized self-use/preview
 artifact. Do not describe it as a general public installer. Do not upload a
 Personal Team iPad IPA because its provisioning is account/device-specific and
 short-lived.

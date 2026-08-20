@@ -3,7 +3,7 @@
 # Exit on error
 set -e
 
-VERSION="${VERSION:-v1.1.0}"
+VERSION="${VERSION:-v1.1.1}"
 PACKAGE_FORMAT="${PACKAGE_FORMAT:-auto}"
 
 # A stable Apple-issued signature is required for a distributable build. An

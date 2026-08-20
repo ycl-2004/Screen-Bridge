@@ -116,7 +116,7 @@ final class LogManager: ObservableObject, @unchecked Sendable {
 
 /// Public release identity shown in the settings UI.
 enum AppVersion {
-    static let current = "v1.1.0"
+    static let current = "v1.1.1"
 }
 
 // MARK: - Changelog
