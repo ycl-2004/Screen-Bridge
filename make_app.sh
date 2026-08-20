@@ -3,7 +3,8 @@
 # Exit on error
 set -e
 
-VERSION="${VERSION:-v1}"
+VERSION="${VERSION:-v1.1.0}"
+PACKAGE_FORMAT="${PACKAGE_FORMAT:-auto}"
 
 # A stable Apple-issued signature is required for a distributable build. An
 # ad-hoc identity can change how macOS tracks Local Network permission between
@@ -39,18 +40,29 @@ echo "  Building Screen Bridge $VERSION (Universal Binary)"
 echo "============================================"
 if [ "$SIGN_IDENTITY" = "-" ]; then
     echo "WARNING: creating an ad-hoc signed local-test build."
-    echo "Do not publish it; macOS Local Network permission identity may not remain stable."
+    echo "If shared, label it as an unnotarized self-use/preview build."
+    echo "macOS Local Network permission identity may not remain stable between builds."
 fi
+
+case "$PACKAGE_FORMAT" in
+    auto|dmg|zip) ;;
+    *)
+        echo "ERROR: PACKAGE_FORMAT must be auto, dmg, or zip."
+        exit 2
+        ;;
+esac
+
 swift build -c release --arch arm64 --arch x86_64
 
 # Define Paths
 BUILD_DIR=".build/apple/Products/Release"
 APP_NAME="Screen Bridge.app"
 DMG_NAME="Screen-Bridge-${VERSION}.dmg"
+ZIP_NAME="Screen-Bridge-${VERSION}-macOS-universal.zip"
 DMG_STAGING="dmg_staging"
 
 # Clean old artifacts
-rm -rf "$APP_NAME" "ScreenBridge.app" "BetterCast.app" "PrivateBetterCast.app" "BetterCastSender.app" "$DMG_STAGING" "$DMG_NAME" "Screen Bridge.dmg" "ScreenBridge.dmg" "BetterCast.dmg"
+rm -rf "$APP_NAME" "ScreenBridge.app" "BetterCast.app" "PrivateBetterCast.app" "BetterCastSender.app" "$DMG_STAGING" "$DMG_NAME" "$ZIP_NAME" "Screen Bridge.dmg" "ScreenBridge.dmg" "BetterCast.dmg"
 
 # ============================================
 # Screen Bridge App (unified sender + receiver)
@@ -70,34 +82,50 @@ cp "assets/branding/BetterCastIcon.icns" "$APP_NAME/Contents/Resources/AppIcon.i
 codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_NAME"
 codesign --verify --deep --strict "$APP_NAME"
 
-# ============================================
-# Create DMG
-# ============================================
-echo "Creating DMG..."
-mkdir -p "$DMG_STAGING"
-cp -R "$APP_NAME" "$DMG_STAGING/"
+PACKAGE_ARTIFACT=""
 
-# Create a symlink to /Applications for drag-to-install
-ln -s /Applications "$DMG_STAGING/Applications"
+create_dmg() {
+    echo "Creating DMG..."
+    mkdir -p "$DMG_STAGING"
+    cp -R "$APP_NAME" "$DMG_STAGING/"
+    ln -s /Applications "$DMG_STAGING/Applications"
 
-# Create DMG from staging folder
-hdiutil create -volname "Screen Bridge $VERSION" \
-    -srcfolder "$DMG_STAGING" \
-    -ov -format UDZO \
-    "$DMG_NAME"
+    if hdiutil create -volname "Screen Bridge $VERSION" \
+        -srcfolder "$DMG_STAGING" \
+        -ov -format UDZO \
+        "$DMG_NAME"; then
+        rm -rf "$DMG_STAGING"
+        echo "Signing DMG..."
+        codesign --force --sign "$SIGN_IDENTITY" "$DMG_NAME"
+        codesign --verify --strict "$DMG_NAME"
+        PACKAGE_ARTIFACT="$DMG_NAME"
+        return 0
+    fi
 
-# Clean up staging
-rm -rf "$DMG_STAGING"
+    rm -rf "$DMG_STAGING" "$DMG_NAME"
+    return 1
+}
 
-# Sign the DMG itself (required for Gatekeeper to accept it)
-echo "Signing DMG..."
-codesign --force --sign "$SIGN_IDENTITY" "$DMG_NAME"
-codesign --verify --strict "$DMG_NAME"
+create_zip() {
+    echo "Creating ZIP..."
+    ditto -c -k --sequesterRsrc --keepParent "$APP_NAME" "$ZIP_NAME"
+    unzip -tq "$ZIP_NAME"
+    PACKAGE_ARTIFACT="$ZIP_NAME"
+}
+
+if [ "$PACKAGE_FORMAT" = "dmg" ]; then
+    create_dmg
+elif [ "$PACKAGE_FORMAT" = "zip" ]; then
+    create_zip
+elif ! create_dmg; then
+    echo "WARNING: DMG creation failed; falling back to a verified ZIP."
+    create_zip
+fi
 
 # ============================================
 # Notarize DMG (if Apple ID is set)
 # ============================================
-if [ -n "$APPLE_ID" ] && [ -n "$APP_PASSWORD" ] && [ -n "$TEAM_ID" ]; then
+if [ -n "$APPLE_ID" ] && [ -n "$APP_PASSWORD" ] && [ -n "$TEAM_ID" ] && [ "$PACKAGE_ARTIFACT" = "$DMG_NAME" ]; then
     echo "Notarizing DMG..."
     xcrun notarytool submit "$DMG_NAME" \
         --apple-id "$APPLE_ID" \
@@ -109,7 +137,7 @@ if [ -n "$APPLE_ID" ] && [ -n "$APP_PASSWORD" ] && [ -n "$TEAM_ID" ]; then
     xcrun stapler staple "$DMG_NAME"
 else
     echo ""
-    echo "Skipping notarization (set APPLE_ID, APP_PASSWORD, and TEAM_ID to enable)"
+    echo "Skipping notarization (requires a DMG plus APPLE_ID, APP_PASSWORD, and TEAM_ID)"
 fi
 
 echo ""
@@ -118,10 +146,14 @@ echo "  Build Complete!"
 echo "============================================"
 echo "App:"
 echo "  - $APP_NAME (signed: $SIGN_IDENTITY)"
-echo "DMG:"
-echo "  - $DMG_NAME"
+echo "Package:"
+echo "  - $PACKAGE_ARTIFACT"
 echo ""
 echo "Installation:"
-echo "  1. Open the DMG and drag Screen Bridge to Applications"
+if [ "$PACKAGE_ARTIFACT" = "$DMG_NAME" ]; then
+    echo "  1. Open the DMG and drag Screen Bridge to Applications"
+else
+    echo "  1. Unzip the archive and move Screen Bridge.app to Applications"
+fi
 echo "  2. Grant Screen Recording permission when prompted"
 echo "  3. Control the extended display from the Mac keyboard, trackpad, mouse, and clipboard"

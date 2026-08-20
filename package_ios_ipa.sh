@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="${VERSION:-v1}"
+VERSION="${VERSION:-v1.1.0}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 PROJECT_PATH="${PROJECT_PATH:-BetterCastIOS.xcodeproj}"
 SCHEME="${SCHEME:-BetterCastReceiverIOS}"

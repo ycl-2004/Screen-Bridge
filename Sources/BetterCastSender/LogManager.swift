@@ -115,11 +115,8 @@ final class LogManager: ObservableObject, @unchecked Sendable {
 // MARK: - App Version
 
 /// Public release identity shown in the settings UI.
-///
-/// Internal self-built bundle numbers may advance while the product is still
-/// preparing its first public release, so the user-facing release stays v1.
 enum AppVersion {
-    static let current = "v1"
+    static let current = "v1.1.0"
 }
 
 // MARK: - Changelog

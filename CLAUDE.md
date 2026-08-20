@@ -189,7 +189,8 @@ Read `Sources/BetterCastReceiverDesktop/BUILD.md` before working here. Treat thi
   an empty entitlement blob.
 - `Sources/BetterCastReceiverIOS/Info.plist` defines iOS receiver metadata.
 - `assets/branding/BetterCastIcon.icns` is the macOS app icon asset.
-- `docs/release-notes/v1.md` contains release notes for the current v1 release.
+- `docs/release-notes/v1.1.0.md` contains release notes for the current v1.1.0
+  release; `docs/release-notes/v1.md` is retained as release history.
 - `docs/release-notes/v8.md` is retained as historical release documentation.
 - `docs/github-readiness.md` captures public-readiness cleanup notes.
 
