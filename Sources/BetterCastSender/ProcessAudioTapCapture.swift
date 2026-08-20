@@ -41,7 +41,11 @@ enum ProcessAudioTapCaptureError: LocalizedError {
 /// deterministically and idempotently. All `destroy()` calls are serialized on
 /// the capture's IO queue (including the one dispatched from the capture's
 /// `deinit`), so no destroy can race an in-flight IO callback.
-private final class ProcessAudioTapHandles {
+///
+/// Swift permits `@unchecked Sendable` for reference types whose mutable state
+/// is protected by internal synchronization:
+/// https://github.com/swiftlang/swift-evolution/blob/main/proposals/0302-concurrent-value-and-concurrent-closures.md
+private final class ProcessAudioTapHandles: @unchecked Sendable {
     var tapID = AudioObjectID(kAudioObjectUnknown)
     var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     var ioProcID: AudioDeviceIOProcID?
@@ -79,9 +83,9 @@ private final class ProcessAudioTapHandles {
 /// - Process enumeration and Core Audio object creation are synchronous mach
 ///   IPC (tens to hundreds of milliseconds) and run on `lifecycleQueue`,
 ///   keeping both the main thread and the real-time IO queue free.
-final class ProcessAudioTapCapture {
-    typealias AudioHandler = (UnsafePointer<AudioBufferList>, AudioStreamBasicDescription, AudioTimeStamp) -> Void
-    typealias StartCompletion = (Result<Void, Error>) -> Void
+final class ProcessAudioTapCapture: @unchecked Sendable {
+    typealias AudioHandler = @Sendable (UnsafePointer<AudioBufferList>, AudioStreamBasicDescription, AudioTimeStamp) -> Void
+    typealias StartCompletion = @Sendable (Result<Void, Error>) -> Void
 
     private let targetApplicationIDs: Set<String>
     private let muteProcess: Bool
@@ -222,7 +226,7 @@ final class ProcessAudioTapCapture {
                     outcome = .failure(error)
                 }
 
-                queue.async { [weak self] in
+                queue.async { [weak self, committedProcessIDs, outcome] in
                     guard let self else {
                         // Nobody left to own the created objects; destroy them
                         // here rather than leaking live Core Audio handles.
@@ -291,7 +295,7 @@ final class ProcessAudioTapCapture {
     ///
     /// Enumeration happens off the main thread; `completion` runs on the main
     /// queue with the rebuild decision.
-    func requiresRebuildForCurrentProcesses(completion: @escaping (Bool) -> Void) {
+    func requiresRebuildForCurrentProcesses(completion: @escaping @Sendable (Bool) -> Void) {
         queue.async { [weak self] in
             guard let self, self.isRunning, !self.isStarting else {
                 DispatchQueue.main.async { completion(false) }

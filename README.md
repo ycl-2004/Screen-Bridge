@@ -336,11 +336,11 @@ and Xcode 26.6:
   `Screen Bridge.app` with `1.1.0 (2)` metadata.
 - Plist validation, shell syntax checks, and `git diff --check`: passed.
 
-Swift 6.3's opt-in `-strict-concurrency=complete -warnings-as-errors` check does
-not currently pass because existing Core Audio/GCD closures are not fully
-annotated `Sendable`. The standard Swift 5 language-mode build and all tests do
-pass; this stricter migration item is tracked as a known limitation rather than
-being hidden by the release packaging.
+The published `v1.1.0` tag surfaced Swift 6.3 strict-concurrency errors in the
+Core Audio/GCD path. Current `main` now expresses the existing queue-isolation
+contract with `Sendable` annotations and immutable cross-queue captures; the
+same `-strict-concurrency=complete -warnings-as-errors` command passes for both
+`arm64` and `x86_64`. The historical tag remains unchanged.
 
 ## Known limitations
 
@@ -350,8 +350,9 @@ being hidden by the release packaging.
 - No public iPad IPA is shipped. Install the receiver with your own Xcode team.
 - Fresh Screen Bridge screenshots have not yet replaced the historical audit
   captures.
-- Swift 6.3 strict concurrency checking exposes existing `Sendable` annotation
-  work in the Core Audio/GCD path, although normal builds and tests pass.
+- The historical `v1.1.0` tag predates the strict-concurrency annotation fix on
+  current `main`, so its original GitHub Actions run remains red even though the
+  current branch passes the same check.
 - Video and audio are intended for trusted local networks and are not
   independently encrypted end to end.
 - The source-provenance question tracked as K5 in

@@ -2862,8 +2862,8 @@ final class NetworkClient: ObservableObject, VideoEncoderDelegate, ScreenRecorde
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let discovered = Result { try AudioApplicationCatalog.applications() }
+            guard let self else { return }
             DispatchQueue.main.async {
-                guard let self else { return }
                 self.audioCatalogRefreshInFlight = false
                 self.applyDiscoveredAudioApplications(discovered)
             }
