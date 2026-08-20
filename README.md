@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/branding/AppIcon.png" alt="Screen Bridge app icon" width="120" height="120">
+  <img src="assets/branding/AppIcon.png" alt="Screen Bridge YC hand-drawn app icon" width="120" height="120">
 </p>
 
 <h1 align="center">Screen Bridge</h1>
@@ -148,9 +148,20 @@ and [`ADR-010`](docs/decisions/ADR-010-per-application-audio-routing.md).
 
 ## Screenshots
 
-Fresh Screen Bridge product screenshots are not checked in yet. The available
-simulator captures are retained only as historical audit evidence because they
-show an earlier product name:
+The current product overview uses the same YC hand-drawn icon language as the
+app bundle: paper texture, wine and denim accents, and the Mac-to-iPad bridge
+metaphor. It is a marketing overview rather than a literal runtime capture.
+
+<p align="center">
+  <img src="assets/app_desc.png" alt="Screen Bridge current Mac-to-iPad product overview" width="836">
+</p>
+
+<p align="center">
+  <sub>Current product overview — Mac sender connected to an iPad receiver.</sub>
+</p>
+
+The available interface captures are retained only as historical audit evidence
+because they show an earlier product name:
 
 - [Historical iPad onboarding capture](docs/audits/2026-08-14-ipad-onboarding.png)
 - [Historical iPad landscape capture](docs/audits/2026-08-14-ipad-landscape.png)
@@ -181,7 +192,9 @@ The current release is
 | Mac release asset | `Screen-Bridge-v1.1.0-macOS-universal.zip` |
 | Mac architectures | `arm64` + `x86_64` |
 | Mac signature | ad-hoc, Hardened Runtime, not notarized |
-| Mac ZIP SHA-256 | `1e06b1b8c350094c26c70d094cac1411bd7d5ba50cc49ff342687efd4bb4bda7` |
+| Mac ZIP SHA-256 | `3ad492680186a13f0cfcd810aae4b00b0d8672d5d7a5077c54147d3e8d3a5b02` |
+| Current app icon | `assets/branding/AppIcon.png` — YC hand-drawn / watercolor style |
+| Product overview asset | `assets/app_desc.png` |
 | iPad release asset | Not published; requires account/device-specific signing |
 
 See the [v1.1.0 release notes](docs/release-notes/v1.1.0.md) for changes and the
@@ -334,6 +347,9 @@ and Xcode 26.6:
   architectures, version metadata, and a valid ad-hoc signature.
 - Unsigned generic iOS Release build: succeeded and produced an `arm64`
   `Screen Bridge.app` with `1.1.0 (2)` metadata.
+- Signed iPad Debug build: installed on the connected iPad Air 5 running iPadOS
+  15.7 with the Personal Team profile accepted as a seven-day development
+  install; this is not a public IPA or long-lived distribution signature.
 - Plist validation, shell syntax checks, and `git diff --check`: passed.
 
 The published `v1.1.0` tag surfaced Swift 6.3 strict-concurrency errors in the
@@ -348,7 +364,8 @@ same `-strict-concurrency=complete -warnings-as-errors` command passes for both
   Control-click → **Open** path, and macOS Local Network permission identity may
   not remain stable between rebuilt ad-hoc versions.
 - No public iPad IPA is shipped. Install the receiver with your own Xcode team.
-- Fresh Screen Bridge screenshots have not yet replaced the historical audit
+- The checked-in product overview is a marketing composition; fresh literal
+  runtime interface captures have not yet replaced the historical audit
   captures.
 - The historical `v1.1.0` tag predates the strict-concurrency annotation fix on
   current `main`, so its original GitHub Actions run remains red even though the
